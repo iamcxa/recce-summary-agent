@@ -80,3 +80,12 @@ pnpm summary anthropic anthropic-sdk-js 123 ./summary.md
 ```bash
 pnpm summary my-org my-private-repo 456 ./pr-456-summary.md
 ```
+
+
+## Agent Logs (JSONL)
+
+The tool automatically generates `agent_log.jsonl` containing detailed execution traces of the multi-agent system. Each line is a JSON object representing an event (agent start, messages, tool calls, results). Use it to debug decisions and monitor performance:
+
+```bash
+cat agent_log.jsonl | jq '.data.message'           
+```
