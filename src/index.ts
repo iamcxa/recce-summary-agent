@@ -28,6 +28,9 @@ function parseArgs(): CLIArgs {
     console.error("Usage: pnpm summary <owner> <repo> <pr-number> [output-path]");
     console.error("\nExample: pnpm summary anthropic anthropic 123");
     console.error("Example: pnpm summary anthropic anthropic 123 ./summary.md");
+    console.error("\nConfiguration:");
+    console.error("  Set OUTPUT_FORMAT=json|slack|markdown in .env to change output format");
+    console.error("  Set PROVIDER=github|gitlab|bitbucket in .env to change provider");
     process.exit(1);
   }
 
@@ -73,6 +76,8 @@ async function main(): Promise<void> {
       model: config.claude.model,
       recceEnabled: config.recce.enabled,
       debugMode: config.debug,
+      provider: config.provider,
+      outputFormat: config.outputFormat,
     });
 
     logger.info("Starting PR analysis...");
@@ -82,7 +87,8 @@ async function main(): Promise<void> {
       args.owner,
       args.repo,
       args.prNumber,
-      config.recce.enabled
+      config.recce.enabled,
+      config.github.token
     );
 
     // Output the summary

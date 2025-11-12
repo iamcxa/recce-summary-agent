@@ -169,6 +169,7 @@ export function formatSystemInit(model: string, toolCount: number, recceToolCoun
 export function formatCompletionSummary(metrics: {
   totalTurns: number;
   totalTokens: number;
+  totalCachedTokens: number;
   totalCost: number;
   elapsedSeconds: number;
   toolCallCount: number;
@@ -178,6 +179,8 @@ export function formatCompletionSummary(metrics: {
   lines.push(`\n📊 Statistics:`);
   lines.push(`   • Turns: ${metrics.totalTurns}`);
   lines.push(`   • Tokens: ${metrics.totalTokens.toLocaleString()}`);
+  lines.push(`   • Cached Tokens: ${metrics.totalCachedTokens.toLocaleString()}`);
+  lines.push(`   • Total (with cache): ${(metrics.totalTokens + metrics.totalCachedTokens).toLocaleString()}`);
   lines.push(`   • Cost: $${metrics.totalCost.toFixed(4)}`);
   lines.push(`   • Duration: ${metrics.elapsedSeconds.toFixed(2)}s`);
   lines.push(`   • Tool Calls: ${metrics.toolCallCount}`);

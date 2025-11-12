@@ -2,41 +2,46 @@
  * GitHub Provider implementation
  */
 
-import { BaseProvider } from "./base.js";
+import { ProviderType } from '../types/providers.js';
+import { BaseProvider, MCPServerConfig } from './base.js';
+import { GITHUB_SYSTEM_EXTENSION } from '../prompts/providers/github.js';
 
 export class GitHubProvider extends BaseProvider {
-  name = "GitHub";
-  type = "github" as const;
+  readonly name = 'GitHub';
+  readonly type: ProviderType = 'github';
 
   getCliCommand(): string {
-    return "gh";
+    return 'gh';
   }
 
   buildCliArgs(prNumber: number): string[] {
-    return ["pr", "view", prNumber.toString(), "--json", "title,body,author"];
+    return [
+      'pr',
+      'view',
+      prNumber.toString(),
+      '--json',
+      'title,body,author,state,createdAt,updatedAt,number,url,files',
+    ];
   }
 
-  getMcpConfig(): Record<string, unknown> {
-    // GitHub MCP server configuration (if available)
-    // For now, return empty config as GitHub MCP server may not be available
+  getMcpConfig(token: string): Record<string, MCPServerConfig> {
     return {
-      // github: {
-      //   type: "stdio",
-      //   command: "gh-mcp-server",
-      //   args: [],
-      // },
+      github: {
+        type: 'stdio',
+        command: 'npx',
+        args: ['-y', '@modelcontextprotocol/server-github'],
+        env: {
+          GITHUB_PERSONAL_ACCESS_TOKEN: token,
+        },
+      },
     };
   }
 
-  getSystemPromptExtension(): string {
-    return `GitHub-specific instructions: Use 'gh pr view' for PR data.`;
+  getPRUrl(owner: string, repo: string, prNumber: number): string {
+    return `https://github.com/${owner}/${repo}/pull/${prNumber}`;
   }
 
-  getUserPromptExtension(): string {
-    return `Context: Working with GitHub PR.`;
+  getSystemPromptExtension(): string {
+    return GITHUB_SYSTEM_EXTENSION;
   }
 }
-
-
-
-

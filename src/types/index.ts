@@ -89,4 +89,8 @@ export interface AgentContext {
   repo: string;
   githubToken: string;
   recceEnabled: boolean;
+
+  // Recce preset checks configuration
+  recceYamlPath?: string;          // Path to recce.yml (optional)
+  executePresetChecks?: boolean;   // Whether to execute preset checks (default: true)
 }

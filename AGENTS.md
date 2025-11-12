@@ -1,406 +1,620 @@
-# Recce Summary Agent - Architecture Guide
+# Agent Architecture Guide
 
-> Knowledge base entry point for AI agents working with this Claude Agent SDK-based codebase.
+**Recce Summary Agent** - Multi-agent PR analysis system built with Claude Agent SDK
 
 ## Overview
 
-**Purpose**: Automated PR summary generator for dbt projects that analyzes pull requests with data quality insights powered by Claude AI and Recce.
+This project implements a multi-agent architecture using the [Claude Agent SDK](https://github.com/anthropics/agent-sdk) to analyze Pull Requests (PRs) in dbt projects. It combines GitHub/GitLab context with Recce validation tools to generate comprehensive PR summaries with data quality insights.
 
-**Architecture**: Multi-agent system using Claude Agent SDK with MCP (Model Context Protocol) integration for Recce data validation tools.
+### Key Concepts
 
-**Technology Stack**:
-- **Agent Framework**: Claude Agent SDK (@anthropic-ai/claude-agent-sdk v0.1.30)
-- **Language**: TypeScript 5.9+ (ES2020 target)
-- **Runtime**: Node.js 18+ with ESM modules
-- **Package Manager**: pnpm 8+
-- **Build Tool**: esbuild (bundling), tsx (development)
-- **Integrations**: GitHub (Octokit), Recce (MCP server), dbt (artifact analysis)
-- **Validation**: Zod for schema validation
+- **Main Agent**: Orchestrator that delegates to specialized subagents
+- **Subagents**: Specialized workers with scoped tool permissions
+- **MCP (Model Context Protocol)**: Standard protocol for connecting AI agents to external tools
+- **Provider Abstraction**: Support for multiple git platforms (GitHub, GitLab, Bitbucket)
+- **Modular Prompts**: Composable prompt fragments for different contexts
+- **Template System**: Multiple output formats (Markdown, JSON, Slack)
 
-**Navigation**:
-- For Claude Agent SDK patterns → [agent-sdk-patterns.mdc](mdc:.cursor/rules/core/agent-sdk-patterns.mdc)
-- For multi-agent architecture → [multi-agent-architecture.mdc](mdc:.cursor/rules/architecture/multi-agent-architecture.mdc)
-- For MCP integration → [mcp-integration.mdc](mdc:.cursor/rules/integration/mcp-integration.mdc)
-- For TypeScript configuration → [typescript-config.mdc](mdc:.cursor/rules/core/typescript-config.mdc)
+## Architecture Diagram
 
----
-
-## Quick Start Decision Matrix
-
-| If you need to...                    | Then...                                      | Reference                                                                   |
-| ------------------------------------ | -------------------------------------------- | --------------------------------------------------------------------------- |
-| Create a new agent                   | Extend PRAnalysisAgent class                 | [agent-sdk-patterns.mdc](mdc:.cursor/rules/core/agent-sdk-patterns.mdc)    |
-| Add a subagent                       | Define in buildSubagents() method            | [multi-agent-architecture.mdc](mdc:.cursor/rules/architecture/multi-agent-architecture.mdc) |
-| Integrate new MCP tool               | Configure in buildMCPServerConfig()          | [mcp-integration.mdc](mdc:.cursor/rules/integration/mcp-integration.mdc)    |
-| Add environment variable             | Update config.ts and validateConfig()        | [config.ts](file:src/config.ts)                                            |
-| Modify output format                 | Edit buildSystemPrompt() in agent.ts         | [agent.ts](file:src/agent.ts)                                              |
-| Change logging behavior              | Update logger.ts or agent message handling   | [logger.ts](file:src/logger.ts)                                            |
-| Add new data type                    | Define in src/types/index.ts                 | [types/index.ts](file:src/types/index.ts)                                  |
-| Debug agent execution                | Check agent_log.jsonl (JSONL format)         | [multi-agent-architecture.mdc](mdc:.cursor/rules/architecture/multi-agent-architecture.mdc) |
-
----
+```
+┌─────────────────────────────────────────────────────────────┐
+│                       Main Agent                            │
+│                    (Orchestrator)                           │
+│  - Model: claude-sonnet-4-5                                 │
+│  - Tools: NONE (delegates only)                             │
+│  - Role: Synthesis & coordination                           │
+└───────────────┬─────────────────┬───────────────────────────┘
+                │                 │
+                │                 │
+    ┌───────────▼──────┐    ┌────▼────────────────┐
+    │ github-context   │    │ recce-analysis      │
+    │ (or gitlab)      │    │                     │
+    │ Model: haiku     │    │ Model: haiku        │
+    │ Tools:           │    │ Tools:              │
+    │ - mcp__github    │    │ - mcp__recce        │
+    └──────────────────┘    └─────────────────────┘
+                │                 │
+                │                 │
+    ┌───────────▼─────────────────▼────────────────┐
+    │         MCP Servers                          │
+    │  - GitHub MCP (stdio)                        │
+    │  - Recce MCP (sse)                           │
+    │  - GitLab MCP (stdio, optional)              │
+    └──────────────────────────────────────────────┘
+```
 
 ## Directory Structure
 
 ```
 recce-summary-agent/
-├── src/                       # TypeScript source code
-│   ├── index.ts               # CLI entry point - argument parsing and main()
-│   ├── agent.ts               # PRAnalysisAgent class - core agent logic
-│   ├── config.ts              # Environment variable management
-│   ├── context.ts             # Inter-agent communication context manager
-│   ├── logger.ts              # Logging utility (console + debug mode)
-│   └── types/                 # TypeScript type definitions
-│       └── index.ts           # PRAnalysisResult, AgentContext, etc.
-├── dist/                      # Compiled JavaScript output (esbuild)
-├── .cursor/rules/             # Agent specification rules
-│   ├── core/                  # Core patterns (Agent SDK, TypeScript)
-│   ├── architecture/          # Multi-agent design patterns
-│   └── integration/           # External integrations (MCP, GitHub)
-├── .mcp.json                  # MCP server config for Cursor IDE (points to jaffle_shop_agentic)
-├── package.json               # Dependencies and scripts
-├── tsconfig.json              # TypeScript compiler configuration
-├── pnpm-workspace.yaml        # pnpm workspace setup
-├── .env                       # Environment variables (not committed)
-└── README.md                  # User documentation
-
-Generated artifacts:
-├── agent_log.jsonl            # Detailed execution trace (JSONL format)
-└── summary.md                 # PR analysis output (Markdown)
+├── src/
+│   ├── agent.ts              # Main agent orchestrator
+│   ├── config.ts             # Configuration management
+│   ├── index.ts              # CLI entry point
+│   │
+│   ├── prompts/              # Modular prompt system
+│   │   ├── index.ts          # PromptBuilder class
+│   │   ├── fragments/        # Reusable prompt components
+│   │   │   ├── base.ts       # Core orchestrator prompts
+│   │   │   ├── github_context.ts
+│   │   │   ├── recce_analysis.ts
+│   │   │   ├── preset_checks.ts
+│   │   │   └── output_formats.ts
+│   │   └── providers/        # Provider-specific extensions
+│   │       ├── github.ts
+│   │       ├── gitlab.ts
+│   │       └── bitbucket.ts
+│   │
+│   ├── providers/            # Git provider abstraction
+│   │   ├── base.ts           # BaseProvider abstract class
+│   │   ├── github.ts         # GitHub implementation
+│   │   ├── gitlab.ts         # GitLab implementation
+│   │   ├── bitbucket.ts      # Bitbucket stub
+│   │   └── index.ts          # ProviderFactory
+│   │
+│   ├── templates/            # Output formatting
+│   │   ├── base.ts           # BaseTemplate abstract class
+│   │   ├── markdown.ts       # Markdown formatter
+│   │   ├── json.ts           # JSON formatter
+│   │   ├── slack.ts          # Slack Block Kit formatter
+│   │   └── index.ts          # TemplateFactory
+│   │
+│   ├── recce/                # Recce integration
+│   │   ├── preset_service.ts # Load and execute preset checks
+│   │   └── types.ts          # Recce-specific types
+│   │
+│   ├── logging/              # Logging infrastructure
+│   │   ├── agent_logger.ts   # Structured logging
+│   │   ├── destinations.ts   # Log destinations
+│   │   └── formatters.ts     # Log formatting
+│   │
+│   └── types/                # TypeScript types
+│       ├── index.ts          # Core types (PR, Diff, Analysis)
+│       ├── prompts.ts        # Prompt context types
+│       └── recce.ts          # Recce types
+│
+├── .cursor/rules/            # Development rules (auto-applied)
+│   ├── core/
+│   │   ├── agent-sdk-patterns.mdc
+│   │   └── typescript-config.mdc
+│   ├── architecture/
+│   │   └── multi-agent-architecture.mdc
+│   └── integration/
+│       └── mcp-integration.mdc
+│
+├── logs/                     # Agent execution logs
+├── dist/                     # Compiled output
+│
+├── CLAUDE.md                 # Claude Code entry point
+├── AGENTS.md                 # This file
+├── README.md                 # Project README
+├── .env.example              # Environment variable template
+├── package.json              # NPM dependencies
+└── tsconfig.json             # TypeScript configuration
 ```
 
-**Purpose of each directory**:
-- `src/index.ts`: CLI entry point with argument parsing (`pnpm summary <owner> <repo> <pr-number>`)
-- `src/agent.ts`: `PRAnalysisAgent` class implementing Claude Agent SDK query loop
-- `src/config.ts`: Centralized environment variable access with validation
-- `src/context.ts`: `ContextManager` for inter-agent message passing
-- `src/types/`: TypeScript interfaces for PR metadata, dbt changes, validation results
+## Agent Execution Flow
 
-**Key files to understand**:
-1. `src/agent.ts` (lines 1-454): Main agent orchestration
-   - `buildSystemPrompt()`: Agent instructions and delegation rules
-   - `buildSubagents()`: Subagent definitions (github-context, recce-validation)
-   - `buildMCPServerConfig()`: Recce MCP server setup
-   - Agent loop processing with JSONL logging
-2. `src/config.ts` (lines 1-52): Configuration management
-3. `src/types/index.ts` (lines 1-93): Core data structures
+### 1. Initialization Phase
 
----
+```typescript
+// src/agent.ts
+export async function createAndAnalyzePR(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  recceEnabled: boolean = true
+): Promise<PRAnalysisResult>
+```
+
+**Steps**:
+1. Build context object (owner, repo, prNumber, features)
+2. Load Recce preset checks from `recce.yml` (if enabled)
+3. Initialize structured logger with metadata
+4. Configure MCP servers based on provider
+
+### 2. Prompt Construction Phase
+
+```typescript
+const promptBuilder = new PromptBuilder();
+
+const systemPrompt = promptBuilder.buildSystemPrompt({
+  provider: config.provider,
+  features: config.features,
+  userIntent: 'pr_analysis',
+  owner, repo, prNumber,
+  presetChecks: presetChecksPrompt,
+  outputFormat: config.outputFormat,
+});
+
+const userPrompt = promptBuilder.buildUserPrompt({
+  provider: config.provider,
+  // ... same context
+});
+```
+
+**Prompt Components**:
+- Base orchestrator instructions
+- Provider-specific extensions (GitHub vs GitLab)
+- Workflow and delegation rules
+- Output format instructions
+- Preset checks (if available)
+
+### 3. Subagent Configuration Phase
+
+```typescript
+const contextSubagentName = config.provider === 'gitlab'
+  ? 'gitlab-context'
+  : 'github-context';
+
+const agents = {
+  [contextSubagentName]: promptBuilder.getProviderContextSubagent(config.provider),
+  ...(context.includeRecce && {
+    'recce-analysis': promptBuilder.getRecceAnalysisSubagent(),
+  }),
+  ...(presetChecksPrompt && {
+    'preset-check-executor': promptBuilder.getPresetCheckExecutorSubagent(),
+  }),
+};
+```
+
+**Dynamic Subagent Selection**:
+- **Provider Context**: `github-context` or `gitlab-context` based on config
+- **Recce Analysis**: Only if `recceEnabled=true`
+- **Preset Executor**: Only if `recce.yml` has checks
+
+### 4. Agent Execution Phase
+
+```typescript
+const result = query({
+  prompt: userPrompt,
+  options: {
+    model: config.claude.model,
+    systemPrompt,
+    cwd: process.cwd(),
+    maxTurns: 20,
+    mcpServers: mcpServers as any,
+    allowedTools: [], // Main agent doesn't call tools
+    agents, // Subagents with tool permissions
+  },
+});
+```
+
+**Message Stream Processing**:
+```typescript
+for await (const message of result) {
+  if (message.type === 'system') {
+    // Handle MCP server connections, tool availability
+    handleSystemMessage(message, logger);
+  }
+  if (message.type === 'assistant') {
+    // Log thinking and tool calls (subagent delegations)
+    logAssistantMessage(message, logger);
+  }
+  if (message.type === 'result') {
+    // Extract final markdown summary
+    finalResult = message.result;
+  }
+}
+```
+
+### 5. Result Processing Phase
+
+```typescript
+return {
+  pr: { owner, repo, number, title, author, state, url, ... },
+  diff: { files, totalAdditions, totalDeletions, changedFilesCount },
+  summary: formattedSummary, // Markdown output from agent
+};
+```
+
+**Optional Template Formatting**:
+- If `outputFormat` is not `markdown`, apply template
+- Parse agent output to extract structured data
+- Format using TemplateFactory
+
+## Subagent Details
+
+### github-context (or gitlab-context)
+
+**Purpose**: Fetch PR/MR metadata and file changes
+
+**Tools**: `mcp__github` or `mcp__gitlab`
+
+**Model**: `haiku` (cost-efficient)
+
+**Workflow**:
+1. Fetch PR details (title, author, description)
+2. Get list of changed files with additions/deletions
+3. Identify dbt models (`.sql` files in `models/`)
+4. Return structured JSON with context tag
+
+**Output Format**:
+```
+[GITHUB-CONTEXT]
+{
+  "pr": {
+    "title": "Add customer segmentation model",
+    "author": "alice",
+    "state": "open",
+    "createdAt": "2024-01-15T10:00:00Z"
+  },
+  "diff": {
+    "files": [
+      { "path": "models/staging/stg_customers.sql", "additions": 25, "deletions": 3 }
+    ],
+    "totalAdditions": 25,
+    "totalDeletions": 3,
+    "changedFilesCount": 1
+  }
+}
+```
+
+### recce-analysis
+
+**Purpose**: Analyze dbt model changes using Recce tools
+
+**Tools**: `mcp__recce`
+
+**Model**: `haiku`
+
+**Workflow**:
+1. **Lineage Diff**: Identify upstream/downstream model impacts
+2. **Schema Diff**: Detect schema changes (breaking changes)
+3. **Row Count Diff**: Compare row counts between base and current
+4. Focus on modified dbt models from github-context
+
+**Output Format**:
+```
+[RECCE-ANALYSIS]
+## Lineage Impact
+- `stg_customers` affects 3 downstream models:
+  - `fct_orders` (direct)
+  - `dim_customers` (direct)
+  - `rpt_daily_sales` (indirect)
+
+## Schema Changes
+- `stg_customers`:
+  - ⚠️ New column: `customer_segment` (string)
+  - ✅ No breaking changes
+
+## Row Count Analysis
+- `stg_customers`: Base: 1000 → Current: 1025 (+2.5%)
+```
+
+### preset-check-executor
+
+**Purpose**: Execute and evaluate recce.yml preset checks
+
+**Tools**: `mcp__recce`
+
+**Model**: `haiku`
+
+**Workflow**:
+1. Parse preset checks from prompt context
+2. Execute each check using appropriate Recce tool
+3. Evaluate results based on check type:
+   - `schema_diff`: PASS if no breaking changes
+   - `row_count_diff`: PASS if within threshold
+   - `value_diff`: PASS if all values match
+   - `query_diff`: PASS if queries identical
+4. Return JSON with overall status
+
+**Output Format**:
+```
+[PRESET-CHECKS]
+{
+  "overallStatus": "PASS",
+  "totalChecks": 3,
+  "passed": 2,
+  "failed": 0,
+  "warnings": 1,
+  "results": [
+    {
+      "name": "stg_customers schema validation",
+      "type": "schema_diff",
+      "status": "WARN",
+      "message": "New column added: customer_segment"
+    },
+    {
+      "name": "stg_orders row count validation",
+      "type": "row_count_diff",
+      "status": "PASS",
+      "message": "Row count within expected range (+1.2%)"
+    }
+  ]
+}
+```
+
+## MCP Server Configuration
+
+### GitHub MCP Server (stdio)
+
+```typescript
+{
+  github: {
+    type: 'stdio',
+    command: 'npx',
+    args: ['-y', '@modelcontextprotocol/server-github'],
+    env: {
+      GITHUB_PERSONAL_ACCESS_TOKEN: process.env.GITHUB_TOKEN,
+    },
+  }
+}
+```
+
+**Prerequisites**:
+- `GITHUB_TOKEN` environment variable set
+- Network access to GitHub API
+
+### GitLab MCP Server (stdio)
+
+```typescript
+{
+  gitlab: {
+    type: 'stdio',
+    command: 'npx',
+    args: ['-y', '@zereight/mcp-gitlab'],
+    env: {
+      GITLAB_PERSONAL_ACCESS_TOKEN: process.env.GITLAB_TOKEN,
+      GITLAB_API_URL: process.env.GITLAB_API_URL || 'https://gitlab.com/api/v4',
+      // ... other config
+    },
+  }
+}
+```
+
+**Prerequisites**:
+- `GITLAB_TOKEN` environment variable set
+- GitLab API access configured
+
+### Recce MCP Server (sse)
+
+```typescript
+{
+  recce: {
+    type: 'sse',
+    url: 'http://0.0.0.0:8080/sse',
+  }
+}
+```
+
+**Prerequisites**:
+- Recce server running: `recce server --cloud`
+- Valid Recce project state
+- Port 8080 accessible
 
 ## Development Workflow
 
-### Agent Execution Flow
-
-**High-Level Sequence**:
-```
-1. CLI Argument Parsing (index.ts)
-   ↓
-2. Configuration Validation (config.ts)
-   ↓
-3. Agent Initialization (agent.ts → PRAnalysisAgent)
-   ↓
-4. Claude Agent SDK Query Loop
-   ├─ System Prompt: Delegation rules
-   ├─ User Prompt: Analysis task
-   ├─ MCP Server Config: Recce tools
-   └─ Subagents: github-context, recce-validation
-   ↓
-5. Agent Loop (for await message of result)
-   ├─ System: Initialization
-   ├─ User: Tool results
-   ├─ Assistant: Claude thinking + tool calls
-   ├─ Tool Progress: Execution status
-   └─ Result: Final summary
-   ↓
-6. Output Generation
-   ├─ summary.md: Markdown output
-   └─ agent_log.jsonl: Execution trace
-```
-
-**Agent Delegation Pattern**:
-```
-Main Agent (no direct tool access)
-  ↓ delegates to
-@agent-github-context (GitHub API access)
-  - Fetch PR metadata
-  - Identify dbt model changes
-  - Return [GITHUB-CONTEXT] tagged response
-  
-@agent-recce-validation (Recce MCP tools access)
-  - mcp__recce__get_lineage_diff
-  - mcp__recce__row_count_diff
-  - mcp__recce__profile_diff
-  - Return [RECCE-VALIDATION] tagged response
-  
-Main Agent (synthesis)
-  ↓ generates
-Comprehensive Markdown Summary
-```
-
-**For detailed agent patterns**, see [agent-sdk-patterns.mdc](mdc:.cursor/rules/core/agent-sdk-patterns.mdc)
-
-### Development Commands
+### 1. Setup Environment
 
 ```bash
+# Clone repository
+git clone <repo-url>
+cd recce-summary-agent
+
 # Install dependencies
 pnpm install
 
-# Run in development mode (with tsx)
-pnpm dev <owner> <repo> <pr-number>
+# Copy environment template
+cp .env.example .env
 
-# Build for production (esbuild)
-pnpm build
-
-# Run built version
-node dist/index.js <owner> <repo> <pr-number>
-
-# Type checking only (no build)
-pnpm type-check
-
-# Generate summary (shortcut)
-pnpm summary <owner> <repo> <pr-number> [output-path]
+# Configure environment variables
+# Edit .env with your tokens and settings
 ```
 
-**Environment setup**:
-1. Copy `.env.example` to `.env`
-2. Set required variables:
-   - `GITHUB_TOKEN`: GitHub PAT with PR read access
-   - `ANTHROPIC_API_KEY`: Claude API key
-3. Optional variables:
-   - `CLAUDE_MODEL`: Model ID (default: `claude-haiku-4-5`)
-   - `DEBUG`: Enable verbose logging (default: `false`)
-   - `RECCE_ENABLED`: Enable Recce analysis (default: `true`)
-
-**For MCP server setup**, see [mcp-integration.mdc](mdc:.cursor/rules/integration/mcp-integration.mdc)
-
-**MCP Configuration**:
-- **IDE (Cursor)**: `.mcp.json` enables Recce tools in Cursor Chat for testing
-  - Points to `jaffle_shop_agentic` test project
-  - Useful for developing agent logic with real MCP tool access
-- **Runtime (Agent)**: `src/agent.ts` configures MCP when agent executes
-  - Dynamic configuration based on target dbt project
-  - Used during actual PR analysis
-
----
-
-## Technology Stack Index
-
-### Core Framework
-- **Claude Agent SDK**: [agent-sdk-patterns.mdc](mdc:.cursor/rules/core/agent-sdk-patterns.mdc)
-  - `query()` function for agent loops
-  - Subagent delegation with isolated permissions
-  - MCP server configuration
-  - Message streaming and processing
-
-### Architecture
-- **Multi-Agent System**: [multi-agent-architecture.mdc](mdc:.cursor/rules/architecture/multi-agent-architecture.mdc)
-  - Main agent orchestration
-  - Subagent definitions (github-context, recce-validation)
-  - Permission-based tool access
-  - Context isolation and message tagging
-
-### Integration
-- **MCP Integration**: [mcp-integration.mdc](mdc:.cursor/rules/integration/mcp-integration.mdc)
-  - Recce MCP server setup (`recce mcp-server`)
-  - Tool permissions and subagent access
-  - Stdio-based communication
-- **GitHub API**: Octokit for PR data fetching (future enhancement)
-- **dbt Integration**: Artifact analysis in target/ and target-base/
-
-### Development Tools
-- **TypeScript**: [typescript-config.mdc](mdc:.cursor/rules/core/typescript-config.mdc)
-  - ES2020 target with strict mode
-  - Path aliases (`@/*` → `src/*`)
-  - ESM modules with `.js` import extensions
-- **Build**: esbuild for bundling, tsx for development
-- **Validation**: Zod for schema validation (future use)
-
----
-
-## Quick Commands & Troubleshooting
-
-### Common Commands
+### 2. Start Recce Server
 
 ```bash
-# Basic usage
-pnpm summary anthropic anthropic-sdk-js 123
-
-# Save to specific file
-pnpm summary anthropic anthropic-sdk-js 123 ./pr-123-analysis.md
-
-# Development mode with debug logging
-DEBUG=true pnpm dev my-org my-repo 456
-
-# Build and verify
-pnpm build
-node dist/index.js my-org my-repo 456
-
-# Type check
-pnpm type-check
-
-# Test Recce MCP tools in Cursor (requires .mcp.json)
-# Open Cursor Chat and try:
-# "Use mcp__recce__get_lineage_diff to show model changes"
+# In a separate terminal
+cd /path/to/your/recce/project
+recce server --cloud
+# Server starts on http://0.0.0.0:8080
 ```
 
-### Common Issues
+### 3. Build and Run
 
-#### Issue: "GITHUB_TOKEN environment variable is not set"
-**Symptoms**: Configuration validation fails at startup  
-**Cause**: Missing `.env` file or empty `GITHUB_TOKEN`  
-**Solution**:
-1. Create `.env` file in project root
-2. Add: `GITHUB_TOKEN=ghp_your_token_here`
-3. Verify with: `cat .env | grep GITHUB_TOKEN`
-
-#### Issue: "ANTHROPIC_API_KEY environment variable is not set"
-**Symptoms**: Configuration validation fails at startup  
-**Cause**: Missing or empty `ANTHROPIC_API_KEY`  
-**Solution**:
-1. Add to `.env`: `ANTHROPIC_API_KEY=sk_your_key_here`
-2. Get API key from: https://console.anthropic.com/
-
-#### Issue: MCP server tools not available
-**Symptoms**: Agent logs show "No Recce tools available"  
-**Cause**: Recce MCP server not running or misconfigured  
-**Solution**:
-1. Ensure Recce is installed: `pip install recce`
-2. Verify MCP server works: `recce mcp-server` (should start stdio server)
-3. Check `buildMCPServerConfig()` in `src/agent.ts`:
-   ```typescript
-   recce: {
-     type: "stdio",
-     command: "recce",
-     args: ["mcp-server"],
-   }
-   ```
-4. Check agent_log.jsonl for MCP server connection errors
-
-#### Issue: Agent exceeds max turns (20)
-**Symptoms**: Analysis stops with "max_turns_reached" message  
-**Cause**: Agent loop not converging (too many tool calls)  
-**Solution**:
-1. Check agent_log.jsonl for repeated tool calls
-2. Simplify prompts in `buildSystemPrompt()` or `buildUserPrompt()`
-3. Increase `maxTurns` in `AgentOptions` (default: 20)
-4. Review subagent prompts for ambiguity
-
-#### Issue: Import errors with .js extensions
-**Symptoms**: TypeScript compilation works but runtime fails  
-**Cause**: ESM requires explicit `.js` extensions in imports  
-**Solution**:
-```typescript
-// ✅ Correct (ESM with .js extension)
-import { config } from "./config.js";
-
-// ❌ Wrong (will fail at runtime)
-import { config } from "./config";
-```
-
-**Debug checklist**:
-- [ ] Check `.env` file exists with required variables
-- [ ] Verify Recce is installed: `recce --version`
-- [ ] Test MCP server: `recce mcp-server` (Ctrl+C to stop)
-- [ ] Check agent_log.jsonl for detailed errors
-- [ ] Enable debug mode: `DEBUG=true pnpm dev ...`
-- [ ] Verify Node version: `node --version` (should be ≥18.0.0)
-
----
-
-## Key Principles
-
-### Agent Design Principles
-1. **Delegation Over Direct Access**: Main agent orchestrates via subagents, doesn't call tools directly
-2. **Permission Isolation**: Tools restricted to specific subagents (`allowedTools` in subagent config)
-3. **Context Tagging**: Subagents prefix responses with `[GITHUB-CONTEXT]` or `[RECCE-VALIDATION]` for observability
-4. **Prompt Clarity**: System prompts explicitly state WHICH agent can access WHICH tools
-5. **Synthesis Role**: Main agent synthesizes subagent findings into comprehensive output
-
-### Code Organization Principles
-1. **ESM Modules**: Use `.js` extensions in imports (TypeScript transpiles to ESM)
-2. **Type Safety**: Define interfaces in `src/types/` before implementing features
-3. **Configuration Centralization**: All env vars accessed through `config.ts`
-4. **Logging Discipline**: Use `logger` for console output, write structured logs to `agent_log.jsonl`
-5. **Single Responsibility**: Each file has one clear purpose (agent logic, config, types, etc.)
-
-### Observability Principles
-1. **JSONL Logging**: Every agent message appended to `agent_log.jsonl` for debugging
-2. **Turn Counting**: Track agent loop iterations in logs
-3. **Token Tracking**: Log usage and cost from Claude API responses
-4. **Subagent Tagging**: Identify which subagent executed in logs
-
----
-
-## Testing Strategy
-
-**Current State**: No automated tests yet (integration testing recommended)
-
-**Recommended Test Structure**:
 ```bash
-tests/
-├── unit/
-│   ├── config.test.ts          # Environment validation
-│   ├── logger.test.ts          # Logging utility
-│   └── context.test.ts         # Context manager
-├── integration/
-│   ├── agent.test.ts           # Full agent execution with mocked MCP
-│   └── github-api.test.ts      # Octokit integration
-└── fixtures/
-    ├── mock-pr-response.json
-    └── mock-recce-output.json
+# Build TypeScript
+pnpm run build
+
+# Run agent
+node dist/index.js \
+  --owner=dbt-labs \
+  --repo=jaffle_shop \
+  --pr=123
+
+# Or use development mode (no build needed)
+pnpm run dev -- --owner=dbt-labs --repo=jaffle_shop --pr=123
 ```
 
-**Testing Tools**:
-- Test framework: Vitest (recommended for ESM + TypeScript)
-- Mocking: Mock MCP server responses for deterministic tests
-- Fixtures: Store sample PR data and Recce outputs
+### 4. Check Logs
 
-**For testing patterns**, see future [testing-strategy.mdc](mdc:.cursor/rules/core/testing-strategy.mdc)
-
----
-
-## Output Formats
-
-### agent_log.jsonl (Observability)
-JSONL format with one JSON object per line:
-```jsonl
-{"timestamp":"2025-11-11T12:00:00.000Z","event":"agent_start","context":{"owner":"anthropic","repo":"anthropic-sdk-js","prNumber":123}}
-{"timestamp":"2025-11-11T12:00:01.000Z","event":"message_received","type":"system","data":{...}}
-{"timestamp":"2025-11-11T12:00:02.000Z","event":"message_received","type":"assistant","data":{...}}
-{"timestamp":"2025-11-11T12:00:10.000Z","event":"agent_complete","elapsedSeconds":10.5}
-```
-
-**Query examples**:
 ```bash
-# Show all agent thinking
-cat agent_log.jsonl | jq 'select(.type == "assistant") | .data.message.content[] | select(.type == "text") | .text'
+# View structured logs
+cat logs/*-main-agent-*.log | tail -50
 
-# Show all tool calls
-cat agent_log.jsonl | jq 'select(.type == "assistant") | .data.message.content[] | select(.type == "tool_use")'
+# View raw JSONL (for debugging)
+cat logs/*-raw.jsonl | jq '.data.type' | uniq -c
 
-# Show final result
-cat agent_log.jsonl | jq 'select(.event == "message_received" and .type == "result")'
+# Check MCP connection status
+cat logs/*-raw.jsonl | jq 'select(.data.type=="system") | .data.mcp_servers'
 ```
 
-### summary.md (Final Output)
-Structured Markdown with sections:
-1. **Overview**: Analysis scope and key findings
-2. **dbt Model Changes**: Added/removed/modified models with counts
-3. **Data Insights**: Row count changes (current vs baseline), percentages, direction (📈/📉)
-4. **Risk Assessment**: Risk level (LOW/MEDIUM/HIGH) with factors
-5. **Data Quality**: Anomalies and warnings detected
-6. **Actionable Recommendations**: Next steps for reviewers
+## Configuration
+
+### Environment Variables
+
+```bash
+# Required
+ANTHROPIC_API_KEY=sk-ant-xxx
+GITHUB_TOKEN=ghp_xxx          # or GITLAB_TOKEN
+
+# Optional - Provider
+PROVIDER=github               # github | gitlab | bitbucket
+
+# Optional - Features
+RECCE_ENABLED=true
+RECCE_PROJECT_PATH=/path/to/recce/project
+RECCE_YAML_PATH=/path/to/recce.yml
+RECCE_EXECUTE_PRESET_CHECKS=true
+
+# Optional - Output
+OUTPUT_FORMAT=markdown        # markdown | slack | json | html
+INCLUDE_PATCHES=false
+MAX_PATCH_LINES=50
+
+# Optional - Model
+CLAUDE_MODEL=claude-sonnet-4-5
+
+# Optional - Debug
+DEBUG=false
+```
+
+### recce.yml Example
+
+```yaml
+checks:
+  - name: stg_customers schema validation
+    description: Ensure no breaking changes in stg_customers
+    type: schema_diff
+    params:
+      model: stg_customers
+
+  - name: stg_orders row count validation
+    description: Validate row count is within acceptable range
+    type: row_count_diff
+    params:
+      model: stg_orders
+
+  - name: fct_orders value validation
+    description: Ensure order totals match
+    type: value_diff
+    params:
+      model: fct_orders
+      columns: [order_total]
+```
+
+## Technology Stack
+
+- **Language**: TypeScript (ESM modules)
+- **Runtime**: Node.js 18+
+- **AI Framework**: Claude Agent SDK
+- **Protocol**: Model Context Protocol (MCP)
+- **Git Providers**: GitHub (Octokit), GitLab (@zereight/mcp-gitlab)
+- **dbt Integration**: Recce (SSE MCP server)
+- **Build Tool**: esbuild
+- **Package Manager**: pnpm
+
+## Troubleshooting
+
+### Issue: MCP Server Connection Failed
+
+**Symptoms**:
+```
+❌ MCP Server 'recce' failed to connect:
+   Status: error
+   Error: ECONNREFUSED 127.0.0.1:8080
+```
+
+**Solutions**:
+1. Ensure Recce server is running: `recce server --cloud`
+2. Check port 8080 is not in use: `lsof -i :8080`
+3. Verify Recce project has valid state
+
+### Issue: GitHub/GitLab Authentication Failed
+
+**Symptoms**:
+```
+❌ MCP Server 'github' failed to connect:
+   Error: 401 Unauthorized
+```
+
+**Solutions**:
+1. Check token is set: `echo $GITHUB_TOKEN`
+2. Verify token has correct scopes (repo access)
+3. Test token manually: `gh auth status` or `curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/user`
+
+### Issue: Agent Loop Timeout
+
+**Symptoms**:
+Agent runs for max turns (20) without completing
+
+**Solutions**:
+1. Check agent logs for repeated tool calls
+2. Verify subagent prompts include context tags
+3. Ensure MCP tools are returning valid data
+4. Check for prompt ambiguity causing confusion
+
+### Issue: TypeScript Import Errors
+
+**Symptoms**:
+```
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module
+```
+
+**Solutions**:
+1. Ensure all imports use `.js` extensions
+2. Rebuild: `pnpm run build`
+3. Check tsconfig.json has `"module": "ESNext"`
+
+## Performance Considerations
+
+- **Model Selection**:
+  - Main agent: `claude-sonnet-4-5` (synthesis requires intelligence)
+  - Subagents: `haiku` (data fetching is straightforward)
+
+- **Cost Optimization**:
+  - Use haiku for 80% of work (subagents)
+  - Only use sonnet for final synthesis
+  - Typical cost per analysis: $0.10-0.30
+
+- **Speed**:
+  - Average execution time: 30-60 seconds
+  - Depends on PR size and number of models changed
+  - MCP tool latency is main bottleneck
+
+## Future Enhancements
+
+- [ ] Support for Bitbucket provider
+- [ ] HTML template output format
+- [ ] Incremental analysis (cache previous results)
+- [ ] GitHub Actions integration
+- [ ] GitLab CI integration
+- [ ] Web UI for viewing analysis history
+- [ ] Support for custom preset check evaluators
+- [ ] Multi-project analysis (monorepo support)
+
+## References
+
+- [Claude Agent SDK Documentation](https://github.com/anthropics/agent-sdk)
+- [Model Context Protocol](https://modelcontextprotocol.io/)
+- [Recce Documentation](https://datarecce.io/docs)
+- [GitHub MCP Server](https://github.com/modelcontextprotocol/servers/tree/main/src/github)
+- [GitLab MCP Server](https://github.com/zereight/mcp-gitlab)
 
 ---
 
-## Related Rules
-
-- [agent-sdk-patterns.mdc](mdc:.cursor/rules/core/agent-sdk-patterns.mdc) - Claude Agent SDK usage
-- [multi-agent-architecture.mdc](mdc:.cursor/rules/architecture/multi-agent-architecture.mdc) - Subagent patterns
-- [mcp-integration.mdc](mdc:.cursor/rules/integration/mcp-integration.mdc) - MCP server setup
-- [typescript-config.mdc](mdc:.cursor/rules/core/typescript-config.mdc) - TypeScript configuration
-
----
-
-**Total Lines**: ~450 (within 550-line limit)
-
+**Version**: 2.0.0 (Multi-agent architecture)
+**Last Updated**: 2025-11-13

@@ -1,26 +1,18 @@
 /**
- * Provider-specific prompt fragments - Bitbucket
+ * Bitbucket-specific prompt extensions
  */
 
-import { PromptFragment } from "../../types/prompts.js";
+export const BITBUCKET_SYSTEM_EXTENSION = `
+## Bitbucket-Specific Context
 
-export function bitbucketContext(
-  workspace: string,
-  repo: string,
-  prNumber: number
-): PromptFragment {
-  return {
-    id: "bitbucket-context",
-    content: `**Bitbucket Context:**
-- Workspace: ${workspace}
-- Repository: ${repo}
-- PR Number: ${prNumber}
-- Use Bitbucket CLI or API for PR data`,
-    priority: 60,
-    condition: (ctx) => ctx.provider === "bitbucket",
-  };
-}
+You are working with Bitbucket as the source control platform.
+- Use Bitbucket MCP tools for PR operations
+- PR IDs are unique within the repository
+- Include Bitbucket-specific metadata (build status, tasks, comments)
+- Reference Bitbucket Pipelines status if available`;
 
+export const BITBUCKET_DELEGATION_INSTRUCTION = `1. **Delegate to bitbucket-context subagent**:
+   - Task: Fetch PR metadata and file changes
+   - Tag response: [BITBUCKET-CONTEXT]`;
 
-
-
+export const BITBUCKET_OUTPUT_HINT = `Include Bitbucket PR URL in the summary for easy navigation.`;

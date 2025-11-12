@@ -25,12 +25,19 @@ export function createConsoleDestination(): LogDestination {
 }
 
 /**
- * Create main log file destination (all turns in one file)
+ * Create agent execution log file (all agent interactions in one file)
  */
-export function createMainLogDestination(context: AgentContext): LogDestination {
+export function createAgentLogDestination(
+  context: AgentContext,
+  agentName: string,
+  timestamp?: string
+): LogDestination {
   const logDir = config.logging?.logDir || "logs";
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const filename = `${timestamp}-${context.owner}-${context.repo}-pr-${context.prNumber}.log`;
+  const ts = timestamp || new Date().toISOString().replace(/[:.]/g, "-");
+  const prInfo = context.prNumber
+    ? `-${context.owner}-${context.repo}-pr-${context.prNumber}`
+    : "-" + (context.owner || "") + "-" + (context.repo || "") + "-pr-0";
+  const filename = `${ts}-${agentName}${prInfo}.log`;
   const filepath = join(process.cwd(), logDir, filename);
 
   // Ensure directory exists
@@ -49,16 +56,15 @@ export function createMainLogDestination(context: AgentContext): LogDestination 
 }
 
 /**
- * Create per-turn log file destination
+ * Create system diagnostic log file (MCP, errors, performance)
  */
-export function createTurnFileStream(
-  turnNumber: number,
-  context: AgentContext
+export function createSystemLogDestination(
+  agentName: string,
+  timestamp?: string
 ): LogDestination {
   const logDir = config.logging?.logDir || "logs";
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const promptSummary = "analyze-pr"; // Could be derived from context
-  const filename = `${timestamp}-${promptSummary}-turn-${turnNumber}.log`;
+  const ts = timestamp || new Date().toISOString().replace(/[:.]/g, "-");
+  const filename = `${ts}-${agentName}-system.log`;
   const filepath = join(process.cwd(), logDir, filename);
 
   // Ensure directory exists
@@ -66,7 +72,7 @@ export function createTurnFileStream(
     mkdirSync(logDir, { recursive: true });
   }
 
-  const stream = createWriteStream(filepath, { flags: "w" });
+  const stream = createWriteStream(filepath, { flags: "a" });
 
   return {
     stream,

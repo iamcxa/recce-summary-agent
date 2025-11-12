@@ -3,6 +3,7 @@
  */
 
 import { AgentContext } from "./index.js";
+import { RecceYaml } from "../recce/preset_parser.js";
 
 export interface PromptFragment {
   id: string;
@@ -22,6 +23,12 @@ export interface PromptContext {
   owner?: string;
   repo?: string;
   prNumber?: number;
+
+  // Recce preset checks (loaded from recce.yml)
+  presetChecks?: RecceYaml | null;
+
+  // Output format selection
+  outputFormat?: "markdown" | "slack" | "json" | "html" | "pr-summary";
 }
 
 export interface ComposedPrompt {
