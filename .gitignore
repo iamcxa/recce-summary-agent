@@ -16,3 +16,7 @@ summary.md
 agent_log.jsonl
 .DS_Store
 recce.yml
+
+# IDE and environment
+.env
+.cursor/

@@ -27,6 +27,22 @@ export const config = {
 
   // Debug mode
   debug: process.env.DEBUG === "true",
+
+  // Provider configuration
+  provider: (process.env.PROVIDER || "github") as "github" | "gitlab" | "bitbucket",
+
+  // Feature flags
+  features: {
+    githubContext: process.env.ENABLE_GITHUB_CONTEXT !== "false",
+    recceValidation: process.env.ENABLE_RECCE_VALIDATION !== "false",
+  },
+
+  // Logging configuration
+  logging: {
+    perTurnFiles: process.env.LOG_PER_TURN !== "false",
+    logDir: process.env.LOG_DIR || "logs",
+    prettifyConsole: process.env.LOG_PRETTY !== "false",
+  },
 };
 
 /**
