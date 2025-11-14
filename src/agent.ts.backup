@@ -1,0 +1,829 @@
+/**
+ * Main Agent - PR Analysis Orchestrator
+ *
+ * Uses Claude Agent SDK with subagent architecture:
+ * - github-context: Fetches PR metadata and file changes
+ * - recce-analysis: Analyzes dbt model changes using Recce MCP tools
+ */
+
+import { query } from '@anthropic-ai/claude-agent-sdk';
+import { formatCommandsForPrompt, loadSlashCommands } from './commands/index.js';
+import { config } from './config.js';
+import { createAgentLogger, logDebug, logError, logInfo, logWarn } from './logging/agent_logger.js';
+import { PromptBuilder } from './prompts/index.js';
+import { GitProviderResolver } from './providers/index.js';
+import type { RecceYaml } from './recce/preset_parser.js';
+import { ReccePresetService } from './recce/preset_service.js';
+import type { PRAnalysisResult } from './types/index.js';
+
+// ============================================================================
+// MCP Server Configuration
+// ============================================================================
+
+/**
+ * Check if Recce MCP server is reachable (pre-flight check)
+ *
+ * @param recceMcpUrl - URL of the Recce MCP server
+ * @param timeoutMs - Timeout in milliseconds (default: 5000)
+ * @returns Promise<boolean> - true if server is reachable, false otherwise
+ */
+async function checkRecceMcpConnection(recceMcpUrl: string, timeoutMs = 5000): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    const response = await fetch(recceMcpUrl, {
+      method: 'HEAD',
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+    return response.ok;
+  } catch (error) {
+    // Connection failed (timeout, network error, etc.)
+    logDebug(`⚠️  Recce MCP connection check failed: ${error}`);
+    return false;
+  }
+}
+
+/**
+ * Build MCP server configuration dynamically from repo URL
+ *
+ * @param repoUrl - Git repository URL (e.g., https://github.com/owner/repo)
+ * @param gitToken - Authentication token for the git provider
+ * @param recceMcpUrl - URL of the Recce MCP server (e.g., http://localhost:8080/sse)
+ * @returns MCP server configuration object
+ */
+function buildMCPConfig(
+  repoUrl: string,
+  gitToken: string,
+  recceMcpUrl: string,
+): Record<string, any> {
+  return GitProviderResolver.buildMCPConfig(repoUrl, gitToken, recceMcpUrl);
+}
+
+// ============================================================================
+// Subagent Definitions - Retrieved from PromptBuilder
+// ============================================================================
+// Subagent configurations are now managed by PromptBuilder in src/prompts/index.ts
+// This provides modularity and allows for provider-specific customization
+
+// ============================================================================
+// Main Agent Execution
+// ============================================================================
+
+export interface AgentPromptOptions {
+  recceConfig?: string;
+  userPrompt?: string;
+  systemPrompt?: string;
+  promptCommandsPath?: string;
+  showSystemPrompt?: boolean;
+}
+
+export async function createAndAnalyzePR(
+  recceMcpUrl: string,
+  repoUrl: string,
+  prNumber: number,
+  recceEnabled = true,
+  promptOptions?: AgentPromptOptions,
+): Promise<PRAnalysisResult> {
+  const startTime = Date.now();
+  let originalStderrWrite: typeof process.stderr.write | null = null;
+
+  // Parse repository URL to extract provider and metadata
+  const repoInfo = GitProviderResolver.parseRepoUrl(repoUrl);
+  const { provider, owner, repo, providerInstance } = repoInfo;
+
+  // Get git token from config
+  const gitToken = config.git.token;
+  if (!gitToken) {
+    throw new Error(
+      'Git token not found. Please set GIT_TOKEN environment variable or pass it via CLI.',
+    );
+  }
+
+  // Build context
+  let includeRecce = recceEnabled && config.recce.enabled;
+
+  // Pre-flight check: Verify Recce MCP server is reachable
+  if (includeRecce) {
+    logInfo('🔍 Checking Recce MCP server connectivity...');
+    const recceReachable = await checkRecceMcpConnection(recceMcpUrl);
+
+    if (recceReachable) {
+      logInfo('✅ Recce MCP server connected');
+    } else {
+      logWarn('⚠️  Recce MCP server unreachable - disabling Recce features');
+      logWarn(`   Server URL: ${recceMcpUrl}`);
+      logWarn(`   Tip: Ensure Recce server is running with 'recce mcp-server --sse'`);
+      includeRecce = false;
+    }
+  }
+
+  const context = {
+    owner,
+    repo,
+    prNumber,
+    includeRecce,
+  };
+
+  // Load preset checks from recce.yml (if enabled)
+  let presetChecks: RecceYaml | null = null;
+  let _presetChecksPrompt: string | undefined;
+
+  if (context.includeRecce && config.recce.executePresetChecks) {
+    try {
+      // Priority: CLI param > env var > auto-detect
+      const yamlPath = promptOptions?.recceConfig || config.recce.yamlPath || undefined; // undefined triggers auto-detect
+
+      presetChecks = await ReccePresetService.loadPresetChecks(yamlPath, config.recce.projectPath);
+
+      if (presetChecks && presetChecks.checks.length > 0) {
+        _presetChecksPrompt = ReccePresetService.formatForPrompt(presetChecks);
+        logInfo(`📋 Loaded ${presetChecks.checks.length} preset checks from recce.yml`);
+        logInfo(`   ${ReccePresetService.getSummary(presetChecks)}`);
+      }
+    } catch (error) {
+      logWarn(`⚠️  Failed to load preset checks: ${(error as Error).message}`);
+      // Continue without preset checks
+    }
+  }
+
+  // Initialize logger
+  const logTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const logger = await createAgentLogger(
+    {
+      owner,
+      repo,
+      prNumber,
+      githubToken: gitToken,
+      recceEnabled: context.includeRecce,
+      recceYamlPath: config.recce.yamlPath,
+      executePresetChecks: config.recce.executePresetChecks,
+    },
+    'main-agent',
+    logTimestamp,
+  );
+
+  // Log agent start
+  logger.logSystemInit('main-agent', config.claude.model, process.cwd());
+  logger.logAgentStart({
+    owner,
+    repo,
+    prNumber,
+    githubToken: gitToken,
+    recceEnabled: context.includeRecce,
+    recceYamlPath: config.recce.yamlPath,
+    executePresetChecks: config.recce.executePresetChecks,
+  });
+
+  try {
+    // Initialize PromptBuilder
+    const promptBuilder = new PromptBuilder();
+
+    // Build MCP configuration dynamically
+    const mcpServers = buildMCPConfig(repoUrl, gitToken, recceMcpUrl);
+
+    // Remove Recce MCP if disabled after pre-flight check
+    if (!context.includeRecce && mcpServers.recce) {
+      delete mcpServers.recce;
+      logger.logger.info('ℹ️  Recce MCP removed from configuration (disabled or unreachable)');
+    }
+
+    // Load slash commands if path provided
+    let commandsSection = '';
+    if (promptOptions?.promptCommandsPath) {
+      try {
+        const commands = loadSlashCommands(promptOptions.promptCommandsPath);
+        if (commands.count > 0) {
+          commandsSection = '\n\n' + formatCommandsForPrompt(commands);
+          logInfo(`📝 Loaded ${commands.count} slash commands from ${commands.source}`);
+        }
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        logWarn(`⚠️  Failed to load slash commands: ${errorMsg}`);
+      }
+    }
+
+    // Build system prompt (or use custom if provided)
+    if (promptOptions?.systemPrompt) {
+      logInfo('⚙️  Using custom system prompt');
+    }
+    const systemPrompt = promptOptions?.systemPrompt
+      ? promptOptions.systemPrompt + commandsSection
+      : promptBuilder.buildSystemPrompt({
+          provider,
+          features: {
+            githubContext: true,
+            recceValidation: context.includeRecce,
+          },
+          userIntent: 'pr_analysis',
+          owner,
+          repo,
+          prNumber,
+          presetChecks: presetChecks,
+        }) + commandsSection;
+
+    // Build user prompt (or use custom if provided)
+    if (promptOptions?.userPrompt) {
+      logInfo('⚙️  Using custom user prompt');
+    }
+    const userPrompt = promptBuilder.buildUserPrompt({
+      provider,
+      features: {
+        githubContext: true,
+        recceValidation: context.includeRecce,
+      },
+      userIntent: 'pr_analysis',
+      owner,
+      repo,
+      prNumber,
+      presetChecks: presetChecks,
+      customPrompt: promptOptions?.userPrompt, // User can override user prompt
+    });
+
+    // Log configuration
+    logger.logMCPConfigBuilt(Object.keys(mcpServers));
+    logInfo(`📋 MCP Servers configured: ${Object.keys(mcpServers).join(', ')}`);
+
+    // Define subagents using PromptBuilder
+    // Use provider-context subagent that adapts to the detected provider
+    const contextSubagentName = providerInstance.getContextSubagentName();
+
+    const agents = {
+      [contextSubagentName]: promptBuilder.getProviderContextSubagent(provider),
+      ...(context.includeRecce && {
+        'recce-analysis': promptBuilder.getRecceAnalysisSubagent(),
+      }),
+      ...(presetChecks &&
+        presetChecks.checks.length > 0 && {
+          'preset-check-executor': promptBuilder.getPresetCheckExecutorSubagent(),
+        }),
+    };
+
+    logger.logger.info(`🤖 Subagents: ${Object.keys(agents).join(', ')}`);
+
+    // Build allowed tools list - include all MCP tools that subagents need
+    const allowedTools: string[] = [
+      // Recce MCP tools (for recce-analysis and preset-check-executor subagents)
+      'mcp__recce__get_lineage_diff',
+      'mcp__recce__lineage_diff',
+      'mcp__recce__schema_diff',
+      'mcp__recce__row_count_diff',
+      'mcp__recce__query',
+      'mcp__recce__query_diff',
+      'mcp__recce__profile_diff',
+      // GitHub MCP tools (for github-context subagent) - UPDATED to match actual tool names
+      'mcp__github__pull_request_read',      // Replaces get_pull_request, get_pull_request_files, etc.
+      'mcp__github__get_file_contents',      // For reading file contents
+      'mcp__github__list_commits',           // For commit history
+      'mcp__github__search_code',            // For code search
+      'mcp__github__issue_read',             // For reading issues
+    ];
+
+    // If showSystemPrompt is enabled, output the prompts and exit
+    if (promptOptions?.showSystemPrompt) {
+      console.log('\n' + '='.repeat(80));
+      console.log('SYSTEM PROMPT');
+      console.log('='.repeat(80));
+      console.log(systemPrompt);
+      console.log('\n' + '='.repeat(80));
+      console.log('USER PROMPT');
+      console.log('='.repeat(80));
+      console.log(userPrompt);
+      console.log('='.repeat(80) + '\n');
+      process.exit(0);
+    }
+
+    // Suppress Agent SDK verbose logging if not in debug mode
+    if (!config.debug) {
+      originalStderrWrite = process.stderr.write;
+      process.stderr.write = ((chunk: any, encoding?: any, callback?: any) => {
+        const str = chunk.toString();
+        // Filter out SDK debug messages and spawn messages
+        if (
+          !str.includes('[DEBUG]') &&
+          !str.includes('Spawning Claude Code process') &&
+          !str.includes('[ERROR]')
+        ) {
+          return originalStderrWrite!.call(process.stderr, chunk, encoding, callback);
+        }
+        if (typeof callback === 'function') callback();
+        return true;
+      }) as typeof process.stderr.write;
+    }
+
+    // Execute agent with Claude SDK
+    const result = query({
+      prompt: userPrompt,
+      options: {
+        model: config.claude.model,
+        systemPrompt,
+        cwd: process.cwd(),
+        maxTurns: 20,
+        mcpServers: mcpServers as any,
+        allowedTools, // Pre-grant permissions for all MCP tools
+        agents, // Subagents with tool permissions
+      },
+    });
+
+    // Process message stream
+    let finalResult = '';
+    let totalTokens = 0;
+    let totalCost = 0;
+    let turnCount = 0;
+    const _rawAgentData: any = {}; // Store structured data from subagents
+
+    try {
+      for await (const message of result) {
+        if (message.type === 'system') {
+          handleSystemMessage(message, logger);
+        }
+
+        if (message.type === 'assistant') {
+          turnCount++;
+          const assistantMsg = message as any;
+          const content = assistantMsg.message?.content || [];
+
+          logger.logTurnStart(turnCount);
+
+          // Log text blocks (thinking)
+          content
+            .filter((c: any) => c.type === 'text')
+            .forEach((block: any) => {
+              if (block.text) {
+                logger.logThinking(turnCount, block.text);
+              }
+            });
+
+          // Log tool calls (subagent delegations)
+          content
+            .filter((c: any) => c.type === 'tool_use')
+            .forEach((tc: any) => {
+              logger.logToolCall(turnCount, tc.name, tc.input);
+            });
+
+          logger.logTurnEnd(turnCount, {
+            tool_calls: content.filter((c: any) => c.type === 'tool_use').length,
+            duration_ms: 0,
+          });
+        }
+
+        if (message.type === 'result') {
+          if (message.subtype === 'success') {
+            finalResult =
+              typeof message.result === 'string' ? message.result : JSON.stringify(message.result);
+
+            totalTokens =
+              ((message.usage as any)?.input_tokens || 0) +
+              ((message.usage as any)?.output_tokens || 0);
+            totalCost = (message as any).total_cost_usd || 0;
+
+            logger.logResultReceived(finalResult.substring(0, 200));
+          } else {
+            throw new Error((message as any).error || 'Agent execution failed');
+          }
+        }
+      }
+
+      const elapsedSeconds = (Date.now() - startTime) / 1000;
+
+      // Log completion
+      logger.logAgentComplete({
+        total_turns: turnCount,
+        total_tokens: totalTokens,
+        total_cost: totalCost,
+        elapsed_seconds: elapsedSeconds,
+        tool_call_count: turnCount,
+      });
+
+      logger.close();
+
+      // Parse agent result to extract structured data
+      // The finalResult from the agent is markdown summary, but we may have captured
+      // structured data in rawAgentData if we implemented parsing in the message loop
+
+      // For now, we'll use the agent's markdown output as-is since it already synthesizes
+      // the data. In the future, we could parse [GITHUB-CONTEXT], [RECCE-ANALYSIS] tags
+      // to extract structured data and pass to templates.
+
+      // Apply template formatting if configured
+      // Note: Output format is always markdown in the new architecture
+      // Custom formatting can be achieved via the customPrompt parameter
+      const formattedSummary = finalResult;
+
+      // Return result in PRAnalysisResult format
+      return {
+        pr: {
+          owner,
+          repo,
+          number: prNumber,
+          title: '',
+          description: '',
+          author: '',
+          state: 'open',
+          createdAt: '',
+          updatedAt: '',
+          url: providerInstance.getPRUrl(owner, repo, prNumber),
+        },
+        diff: {
+          files: [],
+          totalAdditions: 0,
+          totalDeletions: 0,
+          changedFilesCount: 0,
+        },
+        summary: formattedSummary,
+      };
+    } finally {
+      // Restore original stderr write if it was suppressed
+      if (originalStderrWrite) {
+        process.stderr.write = originalStderrWrite;
+      }
+    }
+  } catch (error) {
+    // Restore stderr before throwing
+    if (originalStderrWrite) {
+      process.stderr.write = originalStderrWrite;
+    }
+    logger.logError('agent_execution', error as Error);
+    logger.close();
+    throw error;
+  }
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+function handleSystemMessage(message: any, logger: any): void {
+  const tools = message.tools || [];
+
+  // Debug: Log first few tool names to understand structure
+  if (config.debug && tools.length > 0) {
+    logger.logger.debug({
+      event: 'tools_debug',
+      sample_tools: tools.slice(0, 5),
+      total_tools: tools.length,
+    });
+  }
+
+  // Group tools by server
+  // Note: tools are strings, not objects
+  const byServer: Record<string, number> = {};
+  tools.forEach((toolName: string) => {
+    const match = toolName.match(/^mcp__([^_]+)__/);
+    if (match) {
+      const server = match[1];
+      byServer[server] = (byServer[server] || 0) + 1;
+    }
+  });
+
+  logger.logToolsAvailable(tools.length, byServer);
+
+  // Log MCP server connection status
+  if (message.mcp_servers) {
+    message.mcp_servers.forEach((srv: any) => {
+      if (srv.status === 'connected') {
+        const toolCount = byServer[srv.name] || 0;
+        logger.logMCPConnectSuccess(srv.name, toolCount, 0);
+      } else {
+        // Enhanced error logging
+        logger.logMCPConnectFailed(
+          srv.name,
+          srv.error || srv.status || 'Connection failed',
+          JSON.stringify(srv, null, 2),
+        );
+
+        logError(`❌ MCP Server '${srv.name}' failed to connect:`);
+        logError(`   Status: ${srv.status}`);
+        if (srv.error) {
+          logError(`   Error: ${srv.error}`);
+        }
+        if (srv.message) {
+          logError(`   Message: ${srv.message}`);
+        }
+        if (srv.stderr) {
+          logError(`   Stderr: ${srv.stderr}`);
+        }
+        if (srv.stdout) {
+          logError(`   Stdout: ${srv.stdout}`);
+        }
+
+        logDebug(`   Full server object: ${JSON.stringify(srv, null, 2)}`);
+      }
+    });
+
+    // Console status summary
+    const serverStatus = message.mcp_servers
+      .map((srv: any) => {
+        if (srv.status === 'connected') {
+          return `   • ${srv.name}: ✅ ${srv.status}`;
+        } else {
+          return `   • ${srv.name}: ❌ ${srv.status}`;
+        }
+      })
+      .join('\n');
+    logger.logger.info(`🔌 MCP Servers:\n${serverStatus}`);
+  }
+}
+
+// ============================================================================
+// Main Branch Analysis (Repo Overview)
+// ============================================================================
+
+/**
+ * Analyze a repository's current state (main branch)
+ *
+ * Note: This mode does NOT use Recce as there is no base/current comparison.
+ * It only provides GitHub/GitLab repository metadata and overview.
+ *
+ * @param recceMcpUrl - Recce MCP URL (not used in this mode, kept for interface consistency)
+ * @param repoUrl - Repository URL
+ * @param options - Optional configuration
+ * @returns Analysis result
+ */
+export async function analyzeMainBranch(
+  _recceMcpUrl: string,
+  repoUrl: string,
+  options?: AgentPromptOptions,
+): Promise<PRAnalysisResult> {
+  const startTime = Date.now();
+  let originalStderrWrite: typeof process.stderr.write | null = null;
+
+  // Parse repository URL
+  const repoInfo = GitProviderResolver.parseGitUrl(repoUrl);
+  const { provider, owner, repo, providerInstance } = repoInfo;
+
+  // Get git token
+  const gitToken = config.git.token;
+  if (!gitToken) {
+    throw new Error('Git token not found. Please set GIT_TOKEN environment variable.');
+  }
+
+  logInfo('📊 Repository Analysis Mode (Recce disabled)');
+  logInfo(`   Repository: ${owner}/${repo}`);
+  logInfo(`   Provider: ${provider}`);
+
+  // Initialize logger
+  const logTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const logger = await createAgentLogger(
+    {
+      owner,
+      repo,
+      prNumber: 0, // No PR for main branch analysis
+      githubToken: gitToken,
+      recceEnabled: false,
+      recceYamlPath: config.recce.yamlPath,
+      executePresetChecks: false,
+    },
+    'main-branch-agent',
+    logTimestamp,
+  );
+
+  // Log agent start
+  logger.logSystemInit('main-branch-agent', config.claude.model, process.cwd());
+  logger.logAgentStart({
+    owner,
+    repo,
+    prNumber: 0,
+    githubToken: gitToken,
+    recceEnabled: false,
+  });
+
+  try {
+    const promptBuilder = new PromptBuilder();
+
+    // Build MCP configuration (only provider, no Recce)
+    const providerMcpConfig = providerInstance.getMcpConfig(gitToken);
+    const mcpServers = providerMcpConfig;
+
+    logger.logMCPConfigBuilt(Object.keys(mcpServers));
+    logInfo(`📋 MCP Servers configured: ${Object.keys(mcpServers).join(', ')}`);
+
+    // Load slash commands if path provided
+    let commandsSection = '';
+    if (options?.promptCommandsPath) {
+      try {
+        const commands = loadSlashCommands(options.promptCommandsPath);
+        if (commands.count > 0) {
+          commandsSection = '\n\n' + formatCommandsForPrompt(commands);
+          logInfo(`📝 Loaded ${commands.count} slash commands from ${commands.source}`);
+        }
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        logWarn(`⚠️  Failed to load slash commands: ${errorMsg}`);
+      }
+    }
+
+    // Build system prompt for repo overview (or use custom if provided)
+    if (options?.systemPrompt) {
+      logInfo('⚙️  Using custom system prompt');
+    }
+    const defaultSystemPrompt = `You are a repository analysis assistant. Analyze the given repository and provide a comprehensive overview.
+
+## Your Task
+Fetch repository metadata and generate a structured overview including:
+1. Repository information (description, stars, forks, language)
+2. Recent activity (commits, contributors)
+3. File structure and key files
+4. README highlights
+
+## Workflow
+1. **Delegate to ${providerInstance.getContextSubagentName()} subagent**:
+   - Fetch repository metadata
+   - Get recent commits and contributors
+   - Retrieve README content
+   - Tag response: [${provider.toUpperCase()}-CONTEXT]
+
+2. **Synthesize overview**:
+   - Combine insights into markdown
+   - Focus on high-level repository state
+   - Highlight key information for new contributors
+
+## Output Format
+- Use clear markdown headers
+- Keep sections concise
+- Include links to important resources
+
+${providerInstance.getSystemPromptExtension()}`;
+
+    const systemPrompt = (options?.systemPrompt || defaultSystemPrompt) + commandsSection;
+
+    // Build user prompt (or use custom if provided)
+    if (options?.userPrompt) {
+      logInfo('⚙️  Using custom user prompt');
+    }
+    const baseUserPrompt = `Analyze repository ${owner}/${repo} and generate a comprehensive overview.`;
+    const userPrompt = options?.userPrompt
+      ? `${baseUserPrompt}\n\n## Additional Instructions\n${options.userPrompt}`
+      : baseUserPrompt;
+
+    // Define subagents (only provider context, no Recce)
+    const contextSubagentName = providerInstance.getContextSubagentName();
+    const agents = {
+      [contextSubagentName]: promptBuilder.getProviderContextSubagent(provider),
+    };
+
+    logger.logger.info(`🤖 Subagents: ${Object.keys(agents).join(', ')}`);
+
+    // Build allowed tools list
+    const allowedTools: string[] = [
+      // Provider MCP tools only
+      `mcp__${provider}__*`,
+    ];
+
+    // If showSystemPrompt is enabled, output the prompts and exit
+    if (options?.showSystemPrompt) {
+      console.log('\n' + '='.repeat(80));
+      console.log('SYSTEM PROMPT');
+      console.log('='.repeat(80));
+      console.log(systemPrompt);
+      console.log('\n' + '='.repeat(80));
+      console.log('USER PROMPT');
+      console.log('='.repeat(80));
+      console.log(userPrompt);
+      console.log('='.repeat(80) + '\n');
+      process.exit(0);
+    }
+
+    // Suppress Agent SDK verbose logging if not in debug mode
+    if (!config.debug) {
+      originalStderrWrite = process.stderr.write;
+      process.stderr.write = ((chunk: any, encoding?: any, callback?: any) => {
+        const str = chunk.toString();
+        // Filter out SDK debug messages and spawn messages
+        if (
+          !str.includes('[DEBUG]') &&
+          !str.includes('Spawning Claude Code process') &&
+          !str.includes('[ERROR]')
+        ) {
+          return originalStderrWrite!.call(process.stderr, chunk, encoding, callback);
+        }
+        if (typeof callback === 'function') callback();
+        return true;
+      }) as typeof process.stderr.write;
+    }
+
+    // Execute agent
+    const result = query({
+      prompt: userPrompt,
+      options: {
+        model: config.claude.model,
+        systemPrompt,
+        cwd: process.cwd(),
+        maxTurns: 20,
+        mcpServers: mcpServers as any,
+        allowedTools,
+        agents,
+      },
+    });
+
+    // Process message stream
+    let finalResult = '';
+    let totalTokens = 0;
+    let totalCost = 0;
+    let turnCount = 0;
+
+    try {
+      for await (const message of result) {
+        if (message.type === 'system') {
+          handleSystemMessage(message, logger);
+        }
+
+        if (message.type === 'assistant') {
+          turnCount++;
+          const assistantMsg = message as any;
+          const content = assistantMsg.message?.content || [];
+
+          logger.logTurnStart(turnCount);
+
+          content
+            .filter((c: any) => c.type === 'text')
+            .forEach((block: any) => {
+              if (block.text) {
+                logger.logThinking(turnCount, block.text);
+              }
+            });
+
+          content
+            .filter((c: any) => c.type === 'tool_use')
+            .forEach((tc: any) => {
+              logger.logToolCall(turnCount, tc.name, tc.input);
+            });
+
+          logger.logTurnEnd(turnCount, {
+            tool_calls: content.filter((c: any) => c.type === 'tool_use').length,
+            duration_ms: 0,
+          });
+        }
+
+        if (message.type === 'result') {
+          if (message.subtype === 'success') {
+            finalResult =
+              typeof message.result === 'string' ? message.result : JSON.stringify(message.result);
+
+            totalTokens =
+              ((message.usage as any)?.input_tokens || 0) +
+              ((message.usage as any)?.output_tokens || 0);
+            totalCost = (message as any).total_cost_usd || 0;
+
+            logger.logResultReceived(finalResult.substring(0, 200));
+          } else {
+            throw new Error((message as any).error || 'Agent execution failed');
+          }
+        }
+      }
+
+      const elapsedSeconds = (Date.now() - startTime) / 1000;
+
+      logger.logAgentComplete({
+        total_turns: turnCount,
+        total_tokens: totalTokens,
+        total_cost: totalCost,
+        elapsed_seconds: elapsedSeconds,
+        tool_call_count: turnCount,
+      });
+
+      logger.close();
+
+      // Return result
+      return {
+        pr: {
+          owner,
+          repo,
+          number: 0, // No PR number for main branch analysis
+          title: 'Repository Overview',
+          description: '',
+          author: '',
+          state: 'open',
+          createdAt: '',
+          updatedAt: '',
+          url: providerInstance.getPRUrl(owner, repo, 0).replace('/pull/0', ''), // Repo URL
+        },
+        diff: {
+          files: [],
+          totalAdditions: 0,
+          totalDeletions: 0,
+          changedFilesCount: 0,
+        },
+        summary: finalResult,
+      };
+    } finally {
+      // Restore original stderr write if it was suppressed
+      if (originalStderrWrite) {
+        process.stderr.write = originalStderrWrite;
+      }
+    }
+  } catch (error) {
+    // Restore stderr before throwing
+    if (originalStderrWrite) {
+      process.stderr.write = originalStderrWrite;
+    }
+    logger.logError('agent_execution', error as Error);
+    logger.close();
+    throw error;
+  }
+}
+
+// Export types for external use
+export type { PRAnalysisResult } from './types/index.js';

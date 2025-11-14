@@ -9,7 +9,7 @@ export interface PRMetadata {
   title: string;
   description: string;
   author: string;
-  state: "open" | "closed" | "merged";
+  state: 'open' | 'closed' | 'merged';
   createdAt: string;
   updatedAt: string;
   url: string;
@@ -17,7 +17,7 @@ export interface PRMetadata {
 
 export interface FileChange {
   path: string;
-  status: "added" | "removed" | "modified" | "renamed";
+  status: 'added' | 'removed' | 'modified' | 'renamed';
   additions: number;
   deletions: number;
   changesCount: number;
@@ -68,9 +68,9 @@ export interface DataProfile {
 
 export interface ValidationCheck {
   name: string;
-  status: "passed" | "failed" | "warning" | "skipped";
+  status: 'passed' | 'failed' | 'warning' | 'skipped';
   message: string;
-  severity: "critical" | "high" | "medium" | "low";
+  severity: 'critical' | 'high' | 'medium' | 'low';
   details?: unknown;
 }
 
@@ -89,4 +89,11 @@ export interface AgentContext {
   repo: string;
   githubToken: string;
   recceEnabled: boolean;
+
+  // Recce preset checks configuration
+  recceYamlPath?: string; // Path to recce.yml (optional)
+  executePresetChecks?: boolean; // Whether to execute preset checks (default: true)
 }
+
+// Re-export types from providers
+export type { ProviderType } from './providers.js';

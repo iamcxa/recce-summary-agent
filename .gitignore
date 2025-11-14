@@ -14,5 +14,22 @@ dist/
 todo.md
 summary.md
 agent_log.jsonl
+*.jsonl
 .DS_Store
 recce.yml
+
+# IDE and environment
+.env
+.cursor/
+.claude/
+.mcp.json
+
+# Python (not used in this TypeScript project)
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Generated documentation (optional)
+REFACTORING_*.md
+CLEANUP_*.md
