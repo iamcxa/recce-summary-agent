@@ -1,8 +1,0 @@
-cloud_share:
-  target: dev
-  outputs:
-    dev:
-      type: duckdb
-      path: 'cloud_share.duckdb'
-      threads: 24
-      schema: dev

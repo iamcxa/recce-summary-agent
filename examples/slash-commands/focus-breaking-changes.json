@@ -1,9 +1,0 @@
-{
-  "name": "focus-breaking-changes",
-  "description": "Focus analysis on breaking changes and migration impact",
-  "instructions": "When this command is used, prioritize identifying and analyzing breaking changes in the PR:\n\n1. Scan for API changes, signature modifications, or deprecations\n2. Identify removed functionality or changed behavior\n3. Assess migration complexity and user impact\n4. Provide clear migration guidance with code examples\n5. Highlight any backward compatibility concerns\n\nPresent breaking changes at the top of your analysis with HIGH PRIORITY markers.",
-  "examples": [
-    "/focus-breaking-changes",
-    "Review this PR with /focus-breaking-changes"
-  ]
-}
