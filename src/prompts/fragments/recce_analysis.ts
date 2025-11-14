@@ -2,7 +2,8 @@
  * Recce analysis subagent prompt fragment
  */
 
-export const RECCE_ANALYSIS_DESCRIPTION = 'Analyzes dbt model changes using Recce MCP tools for data quality insights';
+export const RECCE_ANALYSIS_DESCRIPTION =
+  'Analyzes dbt model changes using Recce MCP tools for data quality insights';
 
 export const RECCE_ANALYSIS_PROMPT = `You are a Recce data quality analysis specialist.
 

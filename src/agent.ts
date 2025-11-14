@@ -1,110 +1,74 @@
 /**
- * Main Agent - PR Analysis Orchestrator
- *
- * Uses Claude Agent SDK with subagent architecture:
- * - github-context: Fetches PR metadata and file changes
- * - recce-analysis: Analyzes dbt model changes using Recce MCP tools
+ * Main Agent Module (Refactored)
+ * Clean Architecture: Thin wrapper that delegates to specialized modules
+ * Maintains backward compatibility with existing API
  */
 
-import { query } from '@anthropic-ai/claude-agent-sdk';
-import { config } from './config.js';
+import { analyzePR } from './agent/pr-analyzer.js';
+import type { AgentPromptOptions } from './agent/types.js';
 import type { PRAnalysisResult } from './types/index.js';
-import { createAgentLogger } from './logging/agent_logger.js';
-import { writeFileSync, appendFileSync, existsSync, mkdirSync } from 'fs';
-import { join } from 'path';
-import { ReccePresetService } from './recce/preset_service.js';
+import { config } from './config.js';
+import { formatCommandsForPrompt, loadSlashCommands } from './commands/index.js';
+import { createAgentLogger, logInfo, logWarn } from './logging/agent_logger.js';
 import { PromptBuilder } from './prompts/index.js';
-import { ProviderFactory } from './providers/index.js';
-import { TemplateFactory, type TemplateData } from './templates/index.js';
+import { GitProviderResolver } from './providers/index.js';
+import { executeAgent, suppressSDKLogging } from './agent/agent-executor.js';
 
-// ============================================================================
-// MCP Server Configuration
-// ============================================================================
+// Re-export types for backward compatibility
+export type { AgentPromptOptions, PRAnalysisResult };
 
 /**
- * Build MCP server configuration using provider abstraction
+ * Analyze a PR with dbt model changes using Claude Agent SDK
+ * @deprecated Use analyzePR from './agent/index.js' instead
+ *
+ * @param recceMcpUrl - Recce MCP server URL
+ * @param repoUrl - Repository URL
+ * @param prNumber - Pull request number
+ * @param recceEnabled - Whether to enable Recce features
+ * @param promptOptions - Optional prompt customization
+ * @returns Analysis result with PR metadata and summary
  */
-function buildMCPConfig(context: {
-  owner: string;
-  repo: string;
-  prNumber: number;
-}) {
-  // Get provider instance
-  const provider = ProviderFactory.create(config.provider);
-
-  // Get the appropriate token based on provider
-  const providerToken =
-    config.provider === 'gitlab' ? config.gitlab.token : config.github.token;
-
-  // Get provider-specific MCP config
-  const providerMcpConfig = provider.getMcpConfig(providerToken);
-
-  // Add Recce MCP Server (SSE)
-  return {
-    ...providerMcpConfig,
-    recce: {
-      type: 'sse' as const,
-      url: 'http://0.0.0.0:8080/sse',
-    },
-  };
+export async function createAndAnalyzePR(
+  recceMcpUrl: string,
+  repoUrl: string,
+  prNumber: number,
+  recceEnabled = true,
+  promptOptions?: AgentPromptOptions,
+): Promise<PRAnalysisResult> {
+  // Delegate to the new implementation
+  return analyzePR(recceMcpUrl, repoUrl, prNumber, recceEnabled, promptOptions);
 }
 
-// ============================================================================
-// Subagent Definitions - Retrieved from PromptBuilder
-// ============================================================================
-// Subagent configurations are now managed by PromptBuilder in src/prompts/index.ts
-// This provides modularity and allows for provider-specific customization
-
-// ============================================================================
-// Main Agent Execution
-// ============================================================================
-
-export async function createAndAnalyzePR(
-  owner: string,
-  repo: string,
-  prNumber: number,
-  recceEnabled: boolean = true,
-  githubToken: string = '',
+/**
+ * Analyze a repository's current state (main branch)
+ * Note: This mode does NOT use Recce as there is no base/current comparison.
+ * It only provides GitHub/GitLab repository metadata and overview.
+ *
+ * @param _recceMcpUrl - Recce MCP URL (not used in this mode, kept for interface consistency)
+ * @param repoUrl - Repository URL
+ * @param options - Optional configuration
+ * @returns Analysis result
+ */
+export async function analyzeMainBranch(
+  _recceMcpUrl: string,
+  repoUrl: string,
+  options?: AgentPromptOptions,
 ): Promise<PRAnalysisResult> {
   const startTime = Date.now();
 
-  // Get provider instance for generating URLs
-  const provider = ProviderFactory.create(config.provider);
+  // Parse repository URL
+  const repoInfo = GitProviderResolver.parseGitUrl(repoUrl);
+  const { provider, owner, repo, providerInstance } = repoInfo;
 
-  // Build context
-  const context = {
-    owner,
-    repo,
-    prNumber,
-    includeRecce: recceEnabled && config.recce.enabled,
-  };
-
-  // Load preset checks from recce.yml (if enabled)
-  let presetChecks = null;
-  let presetChecksPrompt = undefined;
-
-  if (context.includeRecce && config.recce.executePresetChecks) {
-    try {
-      presetChecks = await ReccePresetService.loadPresetChecks(
-        config.recce.yamlPath,
-        config.recce.projectPath,
-      );
-
-      if (presetChecks && presetChecks.checks.length > 0) {
-        presetChecksPrompt = ReccePresetService.formatForPrompt(presetChecks);
-        console.log(
-          `📋 Loaded ${presetChecks.checks.length} preset checks from recce.yml`,
-        );
-        console.log(`   ${ReccePresetService.getSummary(presetChecks)}`);
-      }
-    } catch (error) {
-      console.warn(
-        '⚠️  Failed to load preset checks:',
-        (error as Error).message,
-      );
-      // Continue without preset checks
-    }
+  // Get git token
+  const gitToken = config.git.token;
+  if (!gitToken) {
+    throw new Error('Git token not found. Please set GIT_TOKEN environment variable.');
   }
+
+  logInfo('📊 Repository Analysis Mode (Recce disabled)');
+  logInfo(`   Repository: ${owner}/${repo}`);
+  logInfo(`   Provider: ${provider}`);
 
   // Initialize logger
   const logTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -112,239 +76,151 @@ export async function createAndAnalyzePR(
     {
       owner,
       repo,
-      prNumber,
-      githubToken: githubToken || config.github.token,
-      recceEnabled: context.includeRecce,
+      prNumber: 0, // No PR for main branch analysis
+      githubToken: gitToken,
+      recceEnabled: false,
+      recceYamlPath: config.recce.yamlPath,
+      executePresetChecks: false,
     },
-    'main-agent',
+    'main-branch-agent',
     logTimestamp,
   );
 
-  // Setup raw JSONL log
-  const logDir = join(process.cwd(), 'logs');
-  if (!existsSync(logDir)) {
-    mkdirSync(logDir, { recursive: true });
-  }
-  const rawLogPath = join(
-    logDir,
-    `${logTimestamp}-main-agent-${owner}-${repo}-pr-${prNumber}-raw.jsonl`,
-  );
-  writeFileSync(rawLogPath, '');
-
   // Log agent start
-  logger.logSystemInit('main-agent', config.claude.model, process.cwd());
-  logger.logAgentStart({ owner, repo, prNumber });
+  logger.logSystemInit('main-branch-agent', config.claude.model, process.cwd());
+  logger.logAgentStart({
+    owner,
+    repo,
+    prNumber: 0,
+    githubToken: gitToken,
+    recceEnabled: false,
+  });
+
+  let restoreStderr: (() => void) | null = null;
 
   try {
-    // Initialize PromptBuilder
     const promptBuilder = new PromptBuilder();
 
-    // Build configuration
-    const mcpServers = buildMCPConfig(context);
-    const systemPrompt = promptBuilder.buildSystemPrompt({
-      provider: config.provider,
-      features: config.features,
-      userIntent: 'pr_analysis',
-      owner,
-      repo,
-      prNumber,
-      presetChecks: presetChecks, // Pass RecceYaml object, not formatted string
-      outputFormat: config.outputFormat,
-    });
-    // Build user prompt
-    const userPrompt = promptBuilder.buildUserPrompt({
-      provider: config.provider,
-      features: config.features,
-      userIntent: 'pr_analysis',
-      owner,
-      repo,
-      prNumber,
-      presetChecks: presetChecks, // Pass RecceYaml object, not formatted string
-      outputFormat: config.outputFormat,
-    });
+    // Build MCP configuration (only provider, no Recce)
+    const providerMcpConfig = providerInstance.getMcpConfig(gitToken);
+    const mcpServers = providerMcpConfig;
 
-    // Log configuration
     logger.logMCPConfigBuilt(Object.keys(mcpServers));
-    console.log(
-      '📋 MCP Servers configured:',
-      Object.keys(mcpServers).join(', '),
-    );
+    logInfo(`📋 MCP Servers configured: ${Object.keys(mcpServers).join(', ')}`);
 
-    // Define subagents using PromptBuilder
-    // Use provider-context subagent that adapts to the configured provider
-    const contextSubagentName =
-      config.provider === 'gitlab' ? 'gitlab-context' : 'github-context';
+    // Load slash commands if path provided
+    let commandsSection = '';
+    if (options?.promptCommandsPath) {
+      try {
+        const commands = loadSlashCommands(options.promptCommandsPath);
+        if (commands.count > 0) {
+          commandsSection = '\n\n' + formatCommandsForPrompt(commands);
+          logInfo(`📝 Loaded ${commands.count} slash commands from ${commands.source}`);
+        }
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        logWarn(`⚠️  Failed to load slash commands: ${errorMsg}`);
+      }
+    }
 
+    // Build system prompt for repo overview (or use custom if provided)
+    if (options?.systemPrompt) {
+      logInfo('⚙️  Using custom system prompt');
+    }
+    const defaultSystemPrompt = `You are a repository analysis assistant. Analyze the given repository and provide a comprehensive overview.
+
+## Your Task
+Fetch repository metadata and generate a structured overview including:
+1. Repository information (description, stars, forks, language)
+2. Recent activity (commits, contributors)
+3. File structure and key files
+4. README highlights
+
+## Workflow
+1. **Delegate to ${providerInstance.getContextSubagentName()} subagent**:
+   - Fetch repository metadata
+   - Get recent commits and contributors
+   - Retrieve README content
+   - Tag response: [${provider.toUpperCase()}-CONTEXT]
+
+2. **Synthesize overview**:
+   - Combine insights into markdown
+   - Focus on high-level repository state
+   - Highlight key information for new contributors
+
+## Output Format
+- Use clear markdown headers
+- Keep overview concise but informative
+- Include actionable insights`;
+
+    const systemPrompt = options?.systemPrompt
+      ? options.systemPrompt + commandsSection
+      : defaultSystemPrompt + commandsSection;
+
+    const userPrompt = options?.userPrompt ||
+      `Analyze the repository at ${owner}/${repo} and provide a comprehensive overview.`;
+
+    // Define subagents
+    const contextSubagentName = providerInstance.getContextSubagentName();
     const agents = {
-      [contextSubagentName]: promptBuilder.getProviderContextSubagent(
-        config.provider,
-      ),
-      ...(context.includeRecce && {
-        'recce-analysis': promptBuilder.getRecceAnalysisSubagent(),
-      }),
-      ...(presetChecks &&
-        presetChecks.checks.length > 0 && {
-          'preset-check-executor':
-            promptBuilder.getPresetCheckExecutorSubagent(),
-        }),
+      [contextSubagentName]: promptBuilder.getProviderContextSubagent(provider),
     };
 
     logger.logger.info(`🤖 Subagents: ${Object.keys(agents).join(', ')}`);
 
-    // Build allowed tools list - include all MCP tools that subagents need
+    // Allowed tools for main branch analysis (only provider tools, no Recce)
     const allowedTools: string[] = [
-      // Recce MCP tools (for recce-analysis and preset-check-executor subagents)
-      'mcp__recce__get_lineage_diff',
-      'mcp__recce__lineage_diff',
-      'mcp__recce__schema_diff',
-      'mcp__recce__row_count_diff',
-      'mcp__recce__query',
-      'mcp__recce__query_diff',
-      'mcp__recce__profile_diff',
-      // GitHub MCP tools (for github-context subagent)
-      'mcp__github__get_pull_request',
-      'mcp__github__get_pull_request_files',
-      'mcp__github__get_pull_request_status',
-      'mcp__github__get_pull_request_comments',
-      'mcp__github__get_pull_request_reviews',
-      'mcp__github__list_pull_requests',
-      'mcp__github__search_issues',
+      'mcp__github__get_file_contents',
+      'mcp__github__list_commits',
       'mcp__github__search_code',
+      'mcp__github__issue_read',
     ];
 
-    // Execute agent with Claude SDK
-    const result = query({
-      prompt: userPrompt,
-      options: {
-        model: config.claude.model,
-        systemPrompt,
-        cwd: process.cwd(),
-        maxTurns: 20,
-        mcpServers: mcpServers as any,
-        allowedTools, // Pre-grant permissions for all MCP tools
-        agents, // Subagents with tool permissions
-      },
-    });
-
-    // Process message stream
-    let finalResult = '';
-    let totalTokens = 0;
-    let totalCost = 0;
-    let turnCount = 0;
-    let rawAgentData: any = {}; // Store structured data from subagents
-
-    for await (const message of result) {
-      // Log to raw JSONL
-      appendFileSync(
-        rawLogPath,
-        JSON.stringify({
-          timestamp: new Date().toISOString(),
-          type: message.type,
-          data: message,
-        }) + '\n',
-      );
-
-      if (message.type === 'system') {
-        handleSystemMessage(message, logger);
-      }
-
-      if (message.type === 'assistant') {
-        turnCount++;
-        const assistantMsg = message as any;
-        const content = assistantMsg.message?.content || [];
-
-        logger.logTurnStart(turnCount);
-
-        // Log text blocks (thinking)
-        content
-          .filter((c: any) => c.type === 'text')
-          .forEach((block: any) => {
-            if (block.text) {
-              logger.logThinking(turnCount, block.text);
-            }
-          });
-
-        // Log tool calls (subagent delegations)
-        content
-          .filter((c: any) => c.type === 'tool_use')
-          .forEach((tc: any) => {
-            logger.logToolCall(turnCount, tc.name, tc.input);
-          });
-
-        logger.logTurnEnd(turnCount, {
-          tool_calls: content.filter((c: any) => c.type === 'tool_use').length,
-          duration_ms: 0,
-        });
-      }
-
-      if (message.type === 'result') {
-        if (message.subtype === 'success') {
-          finalResult =
-            typeof message.result === 'string'
-              ? message.result
-              : JSON.stringify(message.result);
-
-          totalTokens =
-            ((message.usage as any)?.input_tokens || 0) +
-            ((message.usage as any)?.output_tokens || 0);
-          totalCost = (message as any).total_cost_usd || 0;
-
-          logger.logResultReceived(finalResult.substring(0, 200));
-        } else {
-          throw new Error((message as any).error || 'Agent execution failed');
-        }
-      }
+    // If showSystemPrompt is enabled, output the prompts and exit
+    if (options?.showSystemPrompt) {
+      console.log('\n' + '='.repeat(80));
+      console.log('SYSTEM PROMPT');
+      console.log('='.repeat(80));
+      console.log(systemPrompt);
+      console.log('\n' + '='.repeat(80));
+      console.log('USER PROMPT');
+      console.log('='.repeat(80));
+      console.log(userPrompt);
+      console.log('='.repeat(80) + '\n');
+      process.exit(0);
     }
 
-    const elapsedSeconds = (Date.now() - startTime) / 1000;
+    // Suppress Agent SDK verbose logging if not in debug mode
+    restoreStderr = suppressSDKLogging();
 
-    // Log completion
-    logger.logAgentComplete({
-      total_turns: turnCount,
-      total_tokens: totalTokens,
-      total_cost: totalCost,
-      elapsed_seconds: elapsedSeconds,
-      tool_call_count: turnCount,
-    });
+    // Execute agent with Claude SDK
+    const executionResult = await executeAgent(
+      {
+        userPrompt,
+        systemPrompt,
+        mcpServers,
+        allowedTools,
+        agents,
+        logger,
+      },
+      startTime,
+    );
 
     logger.close();
 
-    // Parse agent result to extract structured data
-    // The finalResult from the agent is markdown summary, but we may have captured
-    // structured data in rawAgentData if we implemented parsing in the message loop
-
-    // For now, we'll use the agent's markdown output as-is since it already synthesizes
-    // the data. In the future, we could parse [GITHUB-CONTEXT], [RECCE-ANALYSIS] tags
-    // to extract structured data and pass to templates.
-
-    // Apply template formatting if configured
-    let formattedSummary = finalResult;
-
-    if (config.outputFormat !== 'markdown') {
-      // For non-markdown formats, we would need to parse the agent output
-      // or restructure to capture structured data during agent execution
-      // For now, log a warning and return markdown
-      console.warn(
-        `⚠️  Output format '${config.outputFormat}' requested but structured data parsing not yet implemented.`,
-      );
-      console.warn(
-        `   Returning markdown format. To use templates, implement structured data extraction.`,
-      );
-    }
-
-    // Return result in PRAnalysisResult format
+    // Return result
     return {
       pr: {
         owner,
         repo,
-        number: prNumber,
+        number: 0,
         title: '',
         description: '',
         author: '',
         state: 'open',
         createdAt: '',
         updatedAt: '',
-        url: provider.getPRUrl(owner, repo, prNumber),
+        url: repoUrl,
       },
       diff: {
         files: [],
@@ -352,74 +228,12 @@ export async function createAndAnalyzePR(
         totalDeletions: 0,
         changedFilesCount: 0,
       },
-      summary: formattedSummary,
+      summary: executionResult.summary,
     };
-  } catch (error) {
-    logger.logError('agent_execution', error as Error);
-    logger.close();
-    throw error;
-  }
-}
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-function handleSystemMessage(message: any, logger: any): void {
-  const tools = message.tools || [];
-
-  // Group tools by server
-  const byServer: Record<string, number> = {};
-  tools.forEach((t: any) => {
-    const match = t.name?.match(/^mcp__([^_]+)__/);
-    if (match) {
-      const server = match[1];
-      byServer[server] = (byServer[server] || 0) + 1;
+  } finally {
+    // Restore original stderr write if it was suppressed
+    if (restoreStderr) {
+      restoreStderr();
     }
-  });
-
-  logger.logToolsAvailable(tools.length, byServer);
-
-  // Log MCP server connection status
-  if (message.mcp_servers) {
-    message.mcp_servers.forEach((srv: any) => {
-      if (srv.status === 'connected') {
-        const toolCount = byServer[srv.name] || 0;
-        logger.logMCPConnectSuccess(srv.name, toolCount, 0);
-      } else {
-        // Enhanced error logging
-        logger.logMCPConnectFailed(
-          srv.name,
-          srv.error || srv.status || 'Connection failed',
-          JSON.stringify(srv, null, 2),
-        );
-
-        console.error(`❌ MCP Server '${srv.name}' failed to connect:`);
-        console.error(`   Status: ${srv.status}`);
-        if (srv.error) console.error(`   Error: ${srv.error}`);
-        if (srv.message) console.error(`   Message: ${srv.message}`);
-        if (srv.stderr) console.error(`   Stderr: ${srv.stderr}`);
-        if (srv.stdout) console.error(`   Stdout: ${srv.stdout}`);
-
-        if (config.debug) {
-          console.error('   Full server object:', JSON.stringify(srv, null, 2));
-        }
-      }
-    });
-
-    // Console status summary
-    const serverStatus = message.mcp_servers
-      .map((srv: any) => {
-        if (srv.status === 'connected') {
-          return `   • ${srv.name}: ✅ ${srv.status}`;
-        } else {
-          return `   • ${srv.name}: ❌ ${srv.status}`;
-        }
-      })
-      .join('\n');
-    logger.logger.info(`🔌 MCP Servers:\n${serverStatus}`);
   }
 }
-
-// Export types for external use
-export type { PRAnalysisResult } from './types/index.js';

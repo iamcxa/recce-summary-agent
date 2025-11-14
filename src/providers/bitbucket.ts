@@ -2,9 +2,9 @@
  * Bitbucket Provider implementation (stub for future support)
  */
 
-import { ProviderType } from '../types/providers.js';
-import { BaseProvider, MCPServerConfig } from './base.js';
 import { BITBUCKET_SYSTEM_EXTENSION } from '../prompts/providers/bitbucket.js';
+import type { ProviderType } from '../types/providers.js';
+import { BaseProvider, type MCPServerConfig } from './base.js';
 
 export class BitbucketProvider extends BaseProvider {
   readonly name = 'Bitbucket';
@@ -40,5 +40,35 @@ export class BitbucketProvider extends BaseProvider {
 
   getSystemPromptExtension(): string {
     return BITBUCKET_SYSTEM_EXTENSION;
+  }
+
+  async testAuthentication(token: string): Promise<{ username: string; email?: string }> {
+    const baseUrl = process.env.BITBUCKET_BASE_URL || 'https://api.bitbucket.org/2.0';
+    const response = await fetch(`${baseUrl}/user`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+        'User-Agent': 'Recce-Agent',
+      },
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(
+        `Bitbucket API authentication failed: ${response.status} ${response.statusText}\n${error}`,
+      );
+    }
+
+    const user = await response.json();
+    return {
+      username: user.username || user.display_name,
+      email: undefined, // Bitbucket API doesn't always return email in /user endpoint
+    };
+  }
+
+  async getRateLimit(_token: string): Promise<{ limit: number; remaining: number; reset: Date }> {
+    // Bitbucket doesn't expose rate limit information in the same way as GitHub/GitLab
+    // We'll return default values
+    throw new Error('Rate limit checking is not supported for Bitbucket');
   }
 }

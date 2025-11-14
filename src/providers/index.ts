@@ -2,11 +2,11 @@
  * Provider Factory - Creates provider instances based on type
  */
 
-import { ProviderType } from '../types/providers.js';
-import { BaseProvider } from './base.js';
+import type { ProviderType } from '../types/providers.js';
+import type { BaseProvider } from './base.js';
+import { BitbucketProvider } from './bitbucket.js';
 import { GitHubProvider } from './github.js';
 import { GitLabProvider } from './gitlab.js';
-import { BitbucketProvider } from './bitbucket.js';
 
 export class ProviderFactory {
   /**
@@ -42,6 +42,9 @@ export class ProviderFactory {
 
 // Export provider classes
 export { BaseProvider } from './base.js';
+export { BitbucketProvider } from './bitbucket.js';
 export { GitHubProvider } from './github.js';
 export { GitLabProvider } from './gitlab.js';
-export { BitbucketProvider } from './bitbucket.js';
+
+// Export resolver
+export { GitProviderResolver, type ParsedPRInfo, type ParsedRepoInfo } from './resolver.js';

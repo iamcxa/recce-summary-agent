@@ -2,8 +2,7 @@
  * Prompt-related type definitions for the agent system
  */
 
-import { AgentContext } from "./index.js";
-import { RecceYaml } from "../recce/preset_parser.js";
+import type { RecceYaml } from '../recce/preset_parser.js';
 
 export interface PromptFragment {
   id: string;
@@ -13,7 +12,7 @@ export interface PromptFragment {
 }
 
 export interface PromptContext {
-  provider: "github" | "gitlab" | "bitbucket";
+  provider: 'github' | 'gitlab' | 'bitbucket';
   features: {
     githubContext: boolean;
     recceValidation: boolean;
@@ -27,8 +26,8 @@ export interface PromptContext {
   // Recce preset checks (loaded from recce.yml)
   presetChecks?: RecceYaml | null;
 
-  // Output format selection
-  outputFormat?: "markdown" | "slack" | "json" | "html" | "pr-summary";
+  // Custom user prompt (appended to user prompt, does not override system prompt)
+  customPrompt?: string;
 }
 
 export interface ComposedPrompt {
@@ -39,7 +38,3 @@ export interface ComposedPrompt {
     provider: string;
   };
 }
-
-
-
-

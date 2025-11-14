@@ -2,9 +2,9 @@
  * GitLab Provider implementation using @zereight/mcp-gitlab
  */
 
-import { ProviderType } from '../types/providers.js';
-import { BaseProvider, MCPServerConfig } from './base.js';
 import { GITLAB_SYSTEM_EXTENSION } from '../prompts/providers/gitlab.js';
+import type { ProviderType } from '../types/providers.js';
+import { BaseProvider, type MCPServerConfig } from './base.js';
 
 export class GitLabProvider extends BaseProvider {
   readonly name = 'GitLab';
@@ -83,5 +83,57 @@ export class GitLabProvider extends BaseProvider {
 
   getSystemPromptExtension(): string {
     return GITLAB_SYSTEM_EXTENSION;
+  }
+
+  async testAuthentication(token: string): Promise<{ username: string; email?: string }> {
+    const apiUrl = process.env.GITLAB_API_URL || 'https://gitlab.com/api/v4';
+    const response = await fetch(`${apiUrl}/user`, {
+      headers: {
+        'PRIVATE-TOKEN': token,
+        'User-Agent': 'Recce-Agent',
+      },
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(
+        `GitLab API authentication failed: ${response.status} ${response.statusText}\n${error}`,
+      );
+    }
+
+    const user = await response.json();
+    return {
+      username: user.username,
+      email: user.email || undefined,
+    };
+  }
+
+  async getRateLimit(token: string): Promise<{ limit: number; remaining: number; reset: Date }> {
+    // GitLab doesn't have a dedicated rate limit endpoint like GitHub
+    // Rate limits are returned in response headers, so we'll make a minimal API call
+    const apiUrl = process.env.GITLAB_API_URL || 'https://gitlab.com/api/v4';
+    const response = await fetch(`${apiUrl}/user`, {
+      headers: {
+        'PRIVATE-TOKEN': token,
+        'User-Agent': 'Recce-Agent',
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `GitLab API rate limit check failed: ${response.status} ${response.statusText}`,
+      );
+    }
+
+    // Extract rate limit from headers
+    const limit = Number.parseInt(response.headers.get('RateLimit-Limit') || '0', 10);
+    const remaining = Number.parseInt(response.headers.get('RateLimit-Remaining') || '0', 10);
+    const resetTimestamp = Number.parseInt(response.headers.get('RateLimit-Reset') || '0', 10);
+
+    return {
+      limit: limit || 2000, // GitLab default is 2000/minute
+      remaining: remaining || 2000,
+      reset: resetTimestamp ? new Date(resetTimestamp * 1000) : new Date(Date.now() + 60000),
+    };
   }
 }

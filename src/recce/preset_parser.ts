@@ -3,10 +3,10 @@
  * Reads and parses recce.yml preset checks
  */
 
-import { readFile } from 'fs/promises';
-import { existsSync } from 'fs';
+import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { load } from 'js-yaml';
-import { join } from 'path';
 
 /**
  * Preset check types supported by Recce
@@ -64,14 +64,19 @@ export class PresetCheckParser {
     for (const check of parsed.checks) {
       if (!check.name || !check.type || !check.params) {
         throw new Error(
-          `Invalid check definition: ${JSON.stringify(check)}. Must have name, type, and params.`
+          `Invalid check definition: ${JSON.stringify(check)}. Must have name, type, and params.`,
         );
       }
 
-      const validTypes: PresetCheckType[] = ['schema_diff', 'row_count_diff', 'value_diff', 'query_diff'];
+      const validTypes: PresetCheckType[] = [
+        'schema_diff',
+        'row_count_diff',
+        'value_diff',
+        'query_diff',
+      ];
       if (!validTypes.includes(check.type)) {
         throw new Error(
-          `Invalid check type: ${check.type}. Must be one of: ${validTypes.join(', ')}`
+          `Invalid check type: ${check.type}. Must be one of: ${validTypes.join(', ')}`,
         );
       }
     }
@@ -86,7 +91,7 @@ export class PresetCheckParser {
    */
   static async parseFromProjectDir(projectDir: string): Promise<RecceYaml> {
     const yamlPath = join(projectDir, 'recce.yml');
-    return this.parse(yamlPath);
+    return PresetCheckParser.parse(yamlPath);
   }
 
   /**

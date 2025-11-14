@@ -2,7 +2,8 @@
  * GitHub context subagent prompt fragment
  */
 
-export const GITHUB_CONTEXT_DESCRIPTION = 'Fetches PR metadata and file changes using GitHub MCP tools';
+export const GITHUB_CONTEXT_DESCRIPTION =
+  'Fetches PR metadata and file changes using GitHub MCP tools';
 
 export const GITHUB_CONTEXT_PROMPT = `You are a GitHub data specialist. Your task is to fetch PR information.
 

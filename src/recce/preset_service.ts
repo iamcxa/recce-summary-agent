@@ -7,9 +7,10 @@
  * - Future: Load from Recce Cloud API, validate, transform, etc.
  */
 
-import { join } from 'path';
+import { join } from 'node:path';
 import { config } from '../config.js';
-import { PresetCheckParser, RecceYaml, ReccePresetCheck } from './preset_parser.js';
+import { logError, logInfo } from '../logging/agent_logger.js';
+import { PresetCheckParser, type RecceYaml } from './preset_parser.js';
 
 /**
  * Service for managing Recce preset checks
@@ -33,23 +34,21 @@ export class ReccePresetService {
   ): Promise<RecceYaml | null> {
     try {
       // Determine the path to recce.yml
-      const yamlPath = this.resolveYamlPath(recceYamlPath, recceProjectPath);
+      const yamlPath = ReccePresetService.resolveYamlPath(recceYamlPath, recceProjectPath);
 
       if (!yamlPath) {
-        console.log('ℹ️  No recce.yml path configured, skipping preset checks');
+        logInfo('ℹ️  No recce.yml path configured, skipping preset checks');
         return null;
       }
 
-      console.log(`📋 Loading preset checks from: ${yamlPath}`);
+      logInfo(`📋 Loading preset checks from: ${yamlPath}`);
       const presetChecks = await PresetCheckParser.parse(yamlPath);
 
-      console.log(
-        `✅ Loaded ${presetChecks.checks.length} preset checks from recce.yml`,
-      );
+      logInfo(`✅ Loaded ${presetChecks.checks.length} preset checks from recce.yml`);
 
       return presetChecks;
     } catch (error) {
-      console.error('❌ Failed to load preset checks:', error);
+      logError(`❌ Failed to load preset checks: ${error}`);
       // Don't fail the entire analysis if preset checks can't be loaded
       // Just log and return null
       return null;
@@ -63,10 +62,7 @@ export class ReccePresetService {
    * @param projectPath - Project directory
    * @returns Resolved path or null
    */
-  private static resolveYamlPath(
-    explicitPath?: string,
-    projectPath?: string,
-  ): string | null {
+  private static resolveYamlPath(explicitPath?: string, projectPath?: string): string | null {
     // 1. Use explicit path if provided
     if (explicitPath) {
       return explicitPath;
@@ -149,7 +145,7 @@ export class ReccePresetService {
    * @param sessionId - Recce Cloud session ID
    * @returns Parsed preset checks
    */
-  static async loadFromRecceCloud(sessionId: string): Promise<RecceYaml | null> {
+  static async loadFromRecceCloud(_sessionId: string): Promise<RecceYaml | null> {
     // TODO: Implement Recce Cloud API integration
     console.warn('⚠️  Recce Cloud API not implemented yet');
     return null;
@@ -161,7 +157,7 @@ export class ReccePresetService {
    * @param presetChecks - Preset checks to validate
    * @returns Validation result
    */
-  static validate(presetChecks: RecceYaml): {
+  static validate(_presetChecks: RecceYaml): {
     valid: boolean;
     errors: string[];
   } {

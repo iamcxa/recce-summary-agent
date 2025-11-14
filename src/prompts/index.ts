@@ -2,51 +2,43 @@
  * PromptBuilder - Composes prompts from fragments based on context
  */
 
-import { PromptContext } from '../types/prompts.js';
 import { ReccePresetService } from '../recce/preset_service.js';
+import type { PromptContext } from '../types/prompts.js';
 
 // Base fragments
 import {
   BASE_ORCHESTRATOR_PROMPT,
-  BASE_WORKFLOW_INSTRUCTIONS,
   BASE_OUTPUT_FORMAT,
+  BASE_WORKFLOW_INSTRUCTIONS,
 } from './fragments/base.js';
 
-import {
-  GITHUB_CONTEXT_DESCRIPTION,
-  GITHUB_CONTEXT_PROMPT,
-} from './fragments/github_context.js';
-
-import {
-  RECCE_ANALYSIS_DESCRIPTION,
-  RECCE_ANALYSIS_PROMPT,
-} from './fragments/recce_analysis.js';
+import { GITHUB_CONTEXT_DESCRIPTION, GITHUB_CONTEXT_PROMPT } from './fragments/github_context.js';
+import { getOutputFormatInstruction } from './fragments/output_formats.js';
 
 import {
   PRESET_CHECK_EXECUTOR_DESCRIPTION,
   PRESET_CHECK_EXECUTOR_PROMPT,
+  PRESET_CHECK_INTEGRATION_RULES,
+  PRESET_CHECK_SEMANTIC_PATTERNS,
+  PRESET_CHECK_STATUS_RULES,
 } from './fragments/preset_checks.js';
-
-import { getOutputFormatInstruction } from './fragments/output_formats.js';
-
-// Provider extensions
+import { RECCE_ANALYSIS_DESCRIPTION, RECCE_ANALYSIS_PROMPT } from './fragments/recce_analysis.js';
 import {
-  GITHUB_SYSTEM_EXTENSION,
-  GITHUB_DELEGATION_INSTRUCTION,
-  GITHUB_OUTPUT_HINT,
-} from './providers/github.js';
-
-import {
-  GITLAB_SYSTEM_EXTENSION,
-  GITLAB_DELEGATION_INSTRUCTION,
-  GITLAB_OUTPUT_HINT,
-} from './providers/gitlab.js';
-
-import {
-  BITBUCKET_SYSTEM_EXTENSION,
   BITBUCKET_DELEGATION_INSTRUCTION,
   BITBUCKET_OUTPUT_HINT,
+  BITBUCKET_SYSTEM_EXTENSION,
 } from './providers/bitbucket.js';
+// Provider extensions
+import {
+  GITHUB_DELEGATION_INSTRUCTION,
+  GITHUB_OUTPUT_HINT,
+  GITHUB_SYSTEM_EXTENSION,
+} from './providers/github.js';
+import {
+  GITLAB_DELEGATION_INSTRUCTION,
+  GITLAB_OUTPUT_HINT,
+  GITLAB_SYSTEM_EXTENSION,
+} from './providers/gitlab.js';
 
 export interface SubagentConfig {
   description: string;
@@ -85,7 +77,9 @@ export class PromptBuilder {
     if (context.presetChecks && context.presetChecks.checks.length > 0) {
       parts.push('\n3. **Delegate to preset-check-executor subagent**:');
       parts.push('   - Task: Execute preset checks from recce.yml by CALLING MCP TOOLS');
-      parts.push('   - CRITICAL: The subagent MUST actually call mcp__recce__* tools for each check');
+      parts.push(
+        '   - CRITICAL: The subagent MUST actually call mcp__recce__* tools for each check',
+      );
       parts.push('   - Expected: Structured JSON with tool results and evaluation for each check');
       parts.push('   - Tag response: [PRESET-CHECKS]');
       parts.push('');
@@ -94,31 +88,29 @@ export class PromptBuilder {
 
     // 6. Synthesis instructions
     const stepNumber = context.presetChecks ? '4' : '3';
-    const outputFormat = context.outputFormat || 'markdown';
     parts.push(`\n${stepNumber}. **Synthesize final summary**:`);
-    parts.push(`   Output format: **${outputFormat.toUpperCase()}**`);
-    if (outputFormat === 'pr-summary') {
-      parts.push('   🚨 CRITICAL: Follow the PR Validation Summary template EXACTLY');
-      parts.push('   Do NOT include delegation details, only the formatted validation report');
-    } else {
-      parts.push('   Combine insights into markdown with appropriate sections');
-    }
+    parts.push('   🚨 CRITICAL: Follow the comprehensive summary format template');
+    parts.push('   Combine insights from all subagents into unified markdown output');
+    parts.push('   Highlight Recce tool capabilities and validation results');
     parts.push('');
 
-    // 7. Output format instructions (dynamic based on outputFormat config)
+    // 7. Output format instructions (dynamic based on preset checks availability)
     const hasPresetChecks = !!(context.presetChecks && context.presetChecks.checks.length > 0);
-    parts.push(getOutputFormatInstruction(outputFormat, hasPresetChecks));
+    parts.push(getOutputFormatInstruction(hasPresetChecks));
 
     // 8. Output format and rules
-    parts.push('\n' + BASE_OUTPUT_FORMAT);
-    parts.push('\n' + BASE_WORKFLOW_INSTRUCTIONS);
+    parts.push(`\n${BASE_OUTPUT_FORMAT}`);
+    parts.push(`\n${BASE_WORKFLOW_INSTRUCTIONS}`);
 
     // 9. Provider-specific output hints
-    parts.push('\n' + this.getProviderOutputHint(context.provider));
+    parts.push(`\n${this.getProviderOutputHint(context.provider)}`);
 
     // 10. Additional rules for preset checks
-    if (context.presetChecks) {
-      parts.push('\n- Clearly show preset check validation results');
+    if (context.presetChecks && context.presetChecks.checks.length > 0) {
+      parts.push('\n## Preset Check Integration');
+      parts.push(PRESET_CHECK_INTEGRATION_RULES);
+      parts.push(PRESET_CHECK_SEMANTIC_PATTERNS);
+      parts.push(PRESET_CHECK_STATUS_RULES);
     }
 
     return parts.join('\n');
@@ -126,17 +118,28 @@ export class PromptBuilder {
 
   /**
    * Build user prompt
+   *
+   * If customPrompt is provided, it will be appended to the base prompt.
+   * This allows users to add additional instructions without overriding the system prompt.
    */
   buildUserPrompt(context: PromptContext): string {
-    const { owner, repo, prNumber } = context;
-    return `Analyze PR #${prNumber} in ${owner}/${repo} and generate a comprehensive summary with data quality insights.`;
+    const { owner, repo, prNumber, customPrompt } = context;
+
+    const basePrompt = `Analyze PR #${prNumber} in ${owner}/${repo} and generate a comprehensive summary with data quality insights.`;
+
+    // Append custom prompt if provided
+    if (customPrompt && customPrompt.trim().length > 0) {
+      return `${basePrompt}\n\n## Additional Instructions\n${customPrompt.trim()}`;
+    }
+
+    return basePrompt;
   }
 
   /**
    * Get subagent configuration for provider-context (github or gitlab)
    * Dynamically returns the appropriate context subagent based on provider
    */
-  getProviderContextSubagent(provider: string = 'github'): SubagentConfig {
+  getProviderContextSubagent(provider = 'github'): SubagentConfig {
     if (provider === 'gitlab') {
       return {
         description: 'Fetches MR metadata and file changes using GitLab MCP tools',
@@ -200,12 +203,11 @@ Focus on DATA, not analysis. Be concise and structured.`,
       description: GITHUB_CONTEXT_DESCRIPTION,
       model: 'haiku',
       tools: [
-        'mcp__github__pull_request_read',
-        'mcp__github__get_pull_request',
-        'mcp__github__get_pull_request_files',
-        'mcp__github__get_pull_request_status',
-        'mcp__github__get_pull_request_comments',
-        'mcp__github__get_pull_request_reviews',
+        // Use the actual GitHub MCP tool names from the server
+        'mcp__github__pull_request_read', // Unified PR reading (replaces get_pull_request, get_pull_request_files, etc.)
+        'mcp__github__get_file_contents',
+        'mcp__github__list_commits',
+        'mcp__github__issue_read',
       ],
       prompt: GITHUB_CONTEXT_PROMPT,
     };
@@ -266,10 +268,7 @@ Focus on DATA, not analysis. Be concise and structured.`,
     }
   }
 
-  private getProviderDelegationInstruction(
-    provider: string,
-    context: PromptContext
-  ): string {
+  private getProviderDelegationInstruction(provider: string, context: PromptContext): string {
     const { owner, repo, prNumber } = context;
     const prRef = `${owner}/${repo} #${prNumber}`;
 
@@ -277,17 +276,17 @@ Focus on DATA, not analysis. Be concise and structured.`,
       case 'github':
         return GITHUB_DELEGATION_INSTRUCTION.replace(
           'Fetch PR metadata and file changes',
-          `Fetch PR metadata and file changes for ${prRef}`
+          `Fetch PR metadata and file changes for ${prRef}`,
         );
       case 'gitlab':
         return GITLAB_DELEGATION_INSTRUCTION.replace(
           'Fetch MR metadata and file changes',
-          `Fetch MR metadata and file changes for ${prRef}`
+          `Fetch MR metadata and file changes for ${prRef}`,
         );
       case 'bitbucket':
         return BITBUCKET_DELEGATION_INSTRUCTION.replace(
           'Fetch PR metadata and file changes',
-          `Fetch PR metadata and file changes for ${prRef}`
+          `Fetch PR metadata and file changes for ${prRef}`,
         );
       default:
         return GITHUB_DELEGATION_INSTRUCTION;

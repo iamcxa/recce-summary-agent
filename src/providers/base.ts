@@ -2,7 +2,7 @@
  * Base Provider interface and abstract class
  */
 
-import { ProviderType } from '../types/providers.js';
+import type { ProviderType } from '../types/providers.js';
 
 export interface MCPServerConfig {
   type: 'stdio' | 'sse' | 'http';
@@ -55,4 +55,29 @@ export abstract class BaseProvider {
   getContextSubagentName(): string {
     return `${this.type}-context`;
   }
+
+  /**
+   * Test authentication and fetch user info
+   *
+   * @param token - Authentication token for the provider
+   * @returns User information (username and optional email)
+   * @throws Error if authentication fails
+   */
+  abstract testAuthentication(token: string): Promise<{
+    username: string;
+    email?: string;
+  }>;
+
+  /**
+   * Get API rate limit information
+   *
+   * @param token - Authentication token for the provider
+   * @returns Rate limit information
+   * @throws Error if rate limit check is not supported
+   */
+  abstract getRateLimit(token: string): Promise<{
+    limit: number;
+    remaining: number;
+    reset: Date;
+  }>;
 }
